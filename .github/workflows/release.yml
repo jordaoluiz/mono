@@ -1,0 +1,22 @@
+# Publica o instalador do Windows no GitHub Releases quando uma tag v* é enviada.
+# Os apps instalados encontram a versão nova sozinhos (atualização automática).
+#   npm version patch   →   git push --follow-tags
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+      - run: npm test
+      - run: npx electron-builder --win nsis --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

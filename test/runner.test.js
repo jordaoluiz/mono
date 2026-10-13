@@ -1,0 +1,20 @@
+// Collection Runner (dados e relatório): node test/runner.test.js
+'use strict';
+const assert = require('assert');
+const R = require('../src/shared/runner');
+const c = R.parseCsv('cpf;nome;obs\n111;"Ana; Maria";"linha 1\nlinha 2"\r\n222;Bia;"diz ""oi"""\n\n');
+assert.deepStrictEqual(c.columns, ['cpf', 'nome', 'obs']);
+assert.strictEqual(c.separator, ';');
+assert.deepStrictEqual(c.rows[0], { cpf: '111', nome: 'Ana; Maria', obs: 'linha 1\nlinha 2' });
+assert.strictEqual(c.rows[1].obs, 'diz "oi"');
+assert.strictEqual(R.parseCsv('﻿a,b\n1,2').rows[0].a, '1');
+const j = R.parseDataFile('[{"cpf":"1"},{"cpf":"2","extra":true}]', 'd.json');
+assert.deepStrictEqual(j.columns, ['cpf', 'extra']);
+assert.throws(() => R.parseDataFile('[1,2]', 'x.json'), /lista de objetos/);
+assert.deepStrictEqual(R.rowFor([{ a: 1 }, { a: 2 }], 5), { a: 2 });
+const recs = [{ iteration: 0, name: 'A', method: 'GET', status: 200, time: 100, tests: [{ name: 't', pass: true }] }, { iteration: 0, name: 'B', method: 'POST', status: 500, time: 300, tests: [{ name: 'x', pass: false, error: 'esperado 500 ser igual a 200' }] }, { iteration: 1, name: 'C', method: 'GET', error: 'DNS', time: null, tests: [] }, { iteration: 1, name: 'D', skipped: true }];
+const s = R.summarize(recs);
+assert.deepStrictEqual([s.requests, s.skipped, s.testsPassed, s.testsFailed, s.errors, s.failedRequests, s.avgTime], [3, 1, 1, 1, 1, 2, 200]);
+const html = R.reportHtml({ name: 'API <x>', envName: 'HOM', startedAt: 0, iterations: 2, dataFile: 'd.csv', records: recs });
+assert.ok(html.includes('API &lt;x&gt;') && html.includes('FALHOU · x') && html.includes('class="fail"'));
+console.log('ok — runner (CSV/JSON, resumo e relatório) passou');

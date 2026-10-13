@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; worker-src 'self'; frame-src mono-preview:; connect-src 'none'" />
+  <title>Mono</title>
+  <link rel="stylesheet" href="design-system.css" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">mono</div>
+      <div class="topbar-right">
+        <div class="env">
+          <label for="envSelect" class="muted small">Ambiente</label>
+          <select id="envSelect" class="select-ghost"></select>
+          <button class="icon-btn" id="envEditBtn" title="Editar ambientes">
+            <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+          </button>
+        </div>
+        <button class="icon-btn" id="layoutBtn" title="Alternar orientação da resposta">
+          <svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path class="lay-stack" d="M3.5 12h17"/><path class="lay-side" d="M12 4.5v15"/></svg>
+        </button>
+        <button class="update-pill hidden" id="updateBtn" title="Reiniciar e instalar a nova versão"><span class="up-dot"></span><span id="updateLabel">Atualização pronta</span></button>
+        <button class="icon-btn" id="settingsBtn" title="Configurações (proxy, SSL, tempo limite)">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+        </button>
+        <button class="icon-btn" id="themeBtn" title="Alternar tema (claro/escuro)">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" class="fill"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <aside class="sidebar">
+      <div class="seg" role="tablist">
+        <button class="seg-btn active" data-side="collections">Coleções</button>
+        <button class="seg-btn" data-side="history">Histórico</button>
+      </div>
+      <div class="search">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/></svg>
+        <input id="sideSearch" placeholder="Buscar" spellcheck="false" />
+      </div>
+      <div class="side-list" id="sideList"></div>
+      <div class="side-footer">
+        <button class="btn-ghost wide" id="newCollectionBtn">+ Nova coleção</button>
+        <button class="btn-ghost wide" id="importSpecBtn" title="Cole o link da documentação: o Mono monta a coleção, o resumo e os diagramas">Importar API</button>
+      </div>
+    </aside>
+
+    <main class="main">
+      <div class="prod-banner hidden" id="prodBanner"></div>
+      <div class="tabs" id="tabs"></div>
+
+      <section class="workspace" id="workspace">
+        <div class="request-pane" id="requestPane">
+          <div class="req-title">
+            <span class="crumbs" id="crumbs"></span>
+            <input id="reqName" class="title-input" spellcheck="false" />
+            <span class="dirty-dot" id="dirtyDot" title="Alterações não salvas"></span>
+            <div class="grow"></div>
+            <button class="btn-ghost sm" id="curlBtn" title="Gerar código: cURL, C#, JavaScript, Python, Power Automate"><span class="code-ic">&lt;/&gt;</span> Código</button>
+            <button class="btn-ghost sm" id="saveBtn">Salvar <kbd>Ctrl S</kbd></button>
+          </div>
+          <div class="urlbar">
+            <button id="method" class="method-btn" type="button" aria-haspopup="listbox" aria-expanded="false" title="Método HTTP">
+              <span class="method-label m GET">GET</span>
+              <svg class="method-chev" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>
+            </button>
+            <input id="url" class="url" placeholder="Digite a URL ou cole um cURL" spellcheck="false" />
+            <button class="btn-compare" id="compareBtn" type="button" title="Enviar para outro ambiente e comparar as respostas">
+              <svg viewBox="0 0 24 24"><path d="M7 7h11m0 0-3-3m3 3-3 3M17 17H6m0 0 3-3m-3 3 3 3"/></svg><span>Comparar</span>
+            </button>
+            <button class="btn-primary" id="sendBtn">Enviar</button>
+          </div>
+          <nav class="subtabs" id="reqTabs">
+            <button data-rt="params" class="active">Params <span class="count" id="cParams"></span></button>
+            <button data-rt="headers">Headers <span class="count" id="cHeaders"></span></button>
+            <button data-rt="body">Body</button>
+            <button data-rt="auth">Auth</button>
+            <button data-rt="scripts">Scripts <span class="dot-ind tab-dot" id="cScripts"></span></button>
+          </nav>
+          <div class="editor" id="reqEditor"></div>
+        </div>
+
+        <div class="divider" id="divider" title="Arraste para redimensionar"></div>
+
+        <div class="response-pane" id="responsePane"></div>
+      </section>
+    </main>
+  </div>
+
+  <div class="modal-backdrop hidden" id="modal"><div class="modal" id="modalBody"></div></div>
+  <div class="menu hidden" id="menu"></div>
+  <div class="method-menu hidden" id="methodMenu" role="listbox" aria-label="Métodos HTTP"></div>
+  <div class="toasts" id="toasts"></div>
+
+  <script src="../shared/shape.js"></script>
+  <script src="../shared/typegen.js"></script>
+  <script src="../shared/openapi.js"></script>
+  <script src="../shared/format.js"></script>
+  <script src="../shared/yaml.js"></script>
+  <script src="../shared/apidocs.js"></script>
+  <script src="../shared/postman.js"></script>
+  <script src="../shared/overview.js"></script>
+  <script src="../shared/sandbox.js"></script>
+  <script src="../shared/codegen.js"></script>
+  <script src="../shared/runner.js"></script>
+  <script src="../shared/xml.js"></script>
+  <script src="../shared/wsdl.js"></script>
+  <script src="ui.js"></script>
+  <script src="script-editor.js"></script>
+  <script src="var-input.js"></script>
+  <script src="auth.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

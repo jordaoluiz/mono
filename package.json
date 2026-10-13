@@ -1,0 +1,75 @@
+{
+  "name": "mono-api-client",
+  "productName": "Mono",
+  "version": "0.1.0",
+  "description": "Cliente de APIs (REST e SOAP) em preto e branco",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "debug": "electron . --devtools --enable-logging",
+    "test": "node test/http.test.js && node test/shared.test.js && node test/docs.test.js && node test/scripts.test.js && node test/runner.test.js && node test/codegen.test.js && node test/certs.test.js && node test/soap.test.js",
+    "dist": "electron-builder --win nsis",
+    "release": "electron-builder --win nsis --publish always"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "license": "MIT",
+  "author": "Luiz Jordão",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jordaoluiz/mono.git"
+  },
+  "dependencies": {
+    "electron-updater": "^6.3.9"
+  },
+  "build": {
+    "appId": "br.com.luizjordao.mono",
+    "productName": "Mono",
+    "copyright": "© 2026 Luiz Jordão",
+    "directories": {
+      "output": "dist",
+      "buildResources": "assets"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "Mono-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Mono",
+      "uninstallDisplayName": "Mono",
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "jordaoluiz",
+        "repo": "mono",
+        "releaseType": "release"
+      }
+    ]
+  }
+}
