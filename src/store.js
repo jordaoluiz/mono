@@ -14,9 +14,15 @@ const DEFAULTS = {
 
 // crypto: { available(), encrypt(str)->base64, decrypt(base64)->str } — no app usa o safeStorage
 // do Electron (DPAPI no Windows, Keychain no macOS), inspirado no keytar do Postman.
+// Ambientes de todos os workspaces: o ativo fica no topo; os outros, guardados em workspaces[].data.
+function allEnvs(d) {
+  const list = [...(d.environments || [])];
+  for (const w of d.workspaces || []) if (w && w.data) list.push(...(w.data.environments || []));
+  return list;
+}
 function mapSecrets(data, fn) {
   const out = structuredClone(data);
-  for (const env of out.environments || []) {
+  for (const env of allEnvs(out)) {
     for (const v of env.vars || []) if (v.secret) v.value = fn(v);
   }
   for (const [sec, key] of SETTING_SECRETS) {
@@ -50,7 +56,7 @@ function createStore(dir, crypto = null) {
       fs.mkdirSync(dir, { recursive: true });
       const toDisk = structuredClone(data);
       if (canCrypt()) {
-        for (const env of toDisk.environments || []) {
+        for (const env of allEnvs(toDisk)) {
           for (const v of env.vars || []) {
             if (v.secret) { v.enc = crypto.encrypt(String(v.value ?? '')); delete v.value; }
             else delete v.enc;
@@ -73,4 +79,4 @@ function createStore(dir, crypto = null) {
   };
 }
 
-module.exports = { createStore, DEFAULTS };
+module.exports = { createStore, DEFAULTS, allEnvs };

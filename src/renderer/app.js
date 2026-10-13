@@ -96,6 +96,172 @@ const MUTATING = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const isMutating = (m) => MUTATING.has(String(m).toUpperCase()) || !['GET', 'HEAD', 'OPTIONS'].includes(String(m).toUpperCase());
 const fill = (s, vars) => String(s || '').replace(/\{\{\s*(\$?[\w.-]+)\s*\}\}/g, (m, k) => (k in vars ? vars[k] : (k[0] === '$' && window.MonoSandbox?.dynamicVar(k)) || m));
 
+// ---------- Workspaces ----------
+// Cada workspace tem suas coleções, ambientes, globais, histórico e abas. O ativo fica no topo de `data`
+// (o resto do app não precisa saber que workspaces existem); os outros ficam guardados em workspaces[].data.
+// Configurações (proxy, certificados, IA) e o tema valem para todos.
+const WS_KEYS = ['collections', 'history', 'environments', 'activeEnvId', 'globals', 'session', 'snapshots', 'lastRun'];
+const activeWorkspace = () => data.workspaces.find((w) => w.id === data.activeWorkspaceId);
+function ensureWorkspaces() {
+  data.workspaces ||= [];
+  if (!data.workspaces.length) data.workspaces.push({ id: uid('ws'), name: 'Meu workspace', description: '', createdAt: Date.now(), data: null });
+  if (!activeWorkspace()) data.activeWorkspaceId = data.workspaces[0].id;
+  activeWorkspace().data = null;
+}
+function normalizeWorkspace() {
+  data.collections ||= []; data.history ||= []; data.environments ||= []; data.globals ||= { vars: [] };
+  if (data.activeEnvId && !envById(data.activeEnvId)) data.activeEnvId = data.environments[0]?.id || '';
+  const s = session();
+  s.tabs = s.tabs.filter((t) => t && t.draft);
+  if (!s.tabs.length) s.tabs.push({ id: uid('tab'), ref: null, draft: newRequest(), dirty: false });
+  if (!s.tabs.some((t) => t.id === s.active)) s.active = s.tabs[0].id;
+}
+const wsData = (w) => (w.id === data.activeWorkspaceId ? data : (w.data || {}));
+function wsStats(w) {
+  const d = wsData(w);
+  const cols = d.collections || [];
+  return { cols: cols.length, reqs: cols.reduce((n, c) => n + (c.requests || []).length, 0), envs: (d.environments || []).length };
+}
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const statsText = (st) => [plural(st.cols, 'coleção', 'coleções'), plural(st.reqs, 'requisição', 'requisições'), plural(st.envs, 'ambiente', 'ambientes')].join(' · ');
+function snapshotWorkspace(w) {
+  const d = wsData(w), out = {};
+  for (const k of WS_KEYS) if (d[k] !== undefined) out[k] = clone(d[k]);
+  return out;
+}
+function switchWorkspace(id, { quiet = false } = {}) {
+  const target = data.workspaces.find((w) => w.id === id);
+  if (!target || id === data.activeWorkspaceId) return;
+  const cur = activeWorkspace();
+  cur.data = {};
+  for (const k of WS_KEYS) { if (data[k] !== undefined) cur.data[k] = data[k]; delete data[k]; }
+  const next = target.data || {};
+  for (const k of WS_KEYS) if (next[k] !== undefined) data[k] = next[k];
+  target.data = null;
+  data.activeWorkspaceId = id;
+  for (const k of Object.keys(runtime)) delete runtime[k];
+  $('#modal').classList.add('hidden');
+  $('#sideSearch').value = '';
+  normalizeWorkspace();
+  persist();
+  renderWorkspaceBtn(); renderEnvSelect(); renderTabs(); renderRequest(); renderResponse(); renderSidebar();
+  if (!quiet) toast(`Workspace: ${target.name}`);
+}
+function renderWorkspaceBtn() {
+  const w = activeWorkspace();
+  $('#wsName').textContent = w.name;
+  $('#wsBtn').title = `Workspace: ${w.name}${w.description ? ' — ' + w.description : ''}\n${statsText(wsStats(w))}`;
+}
+function openWorkspaceMenu(anchor) {
+  const items = data.workspaces.map((w) => ({
+    label: h('span', { class: 'ws-mi' + (w.id === data.activeWorkspaceId ? ' on' : '') },
+      h('span', { class: 'ws-mi-check', html: w.id === data.activeWorkspaceId ? icons.check : '' }),
+      h('span', { class: 'ws-mi-name' }, w.name)),
+    run: () => switchWorkspace(w.id),
+  }));
+  showMenu(anchor, [...items, '-', { label: '+ Novo workspace', run: () => openWorkspaceForm() }, { label: 'Gerenciar workspaces…', run: openWorkspaces }]);
+}
+// Criar (sem `w`) ou editar nome/descrição.
+function openWorkspaceForm(w = null, { back = null } = {}) {
+  openModal((body, close) => {
+    const name = h('input', { value: w ? w.name : '', placeholder: 'Ex.: Fiscal, Cliente X, Pessoal', spellcheck: 'false', maxlength: 60 });
+    const desc = h('input', { value: w ? w.description || '' : '', placeholder: 'Opcional — para que serve este workspace', spellcheck: 'false', maxlength: 140 });
+    const hasEnvs = data.environments.length || globalsOf().vars.some((v) => v.key);
+    const copyEnvs = h('input', { type: 'checkbox' });
+    const err = h('p', { class: 'ws-err hidden' });
+    const submit = () => {
+      const n = name.value.trim();
+      if (!n) { err.textContent = 'Dê um nome ao workspace.'; err.classList.remove('hidden'); name.focus(); return; }
+      if (data.workspaces.some((x) => x !== w && x.name.toLowerCase() === n.toLowerCase())) { err.textContent = 'Já existe um workspace com esse nome.'; err.classList.remove('hidden'); name.focus(); return; }
+      close();
+      if (w) {
+        w.name = n; w.description = desc.value.trim(); persist(); renderWorkspaceBtn();
+        if (back) back();
+        return;
+      }
+      const nw = { id: uid('ws'), name: n, description: desc.value.trim(), createdAt: Date.now(), data: { collections: [], history: [], environments: [], activeEnvId: '', globals: { vars: [] } } };
+      if (copyEnvs.checked) {
+        nw.data.environments = clone(data.environments).map((e) => ({ ...e, id: uid('env') }));
+        const idx = data.environments.findIndex((e) => e.id === data.activeEnvId);
+        nw.data.activeEnvId = idx >= 0 ? nw.data.environments[idx].id : '';
+        nw.data.globals = clone(globalsOf());
+      }
+      data.workspaces.push(nw);
+      switchWorkspace(nw.id, { quiet: true });
+      toast(`Workspace “${n}” criado`);
+    };
+    for (const el of [name, desc]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    body.append(
+      h('h2', {}, w ? 'Editar workspace' : 'Novo workspace'),
+      h('p', { class: 'sub' }, w ? 'Nome e descrição aparecem no seletor do topo.' : 'Um espaço separado, com coleções, ambientes, variáveis globais, histórico e abas próprios. Configurações e tema continuam valendo para todos.'),
+      h('div', { class: 'field' }, h('label', {}, 'Nome'), name),
+      h('div', { class: 'field' }, h('label', {}, 'Descrição'), desc),
+      !w && hasEnvs ? h('label', { class: 'check-row' }, copyEnvs, h('span', {}, h('b', {}, 'Copiar ambientes e variáveis globais'), ` de “${activeWorkspace().name}”`)) : null,
+      err,
+      h('div', { class: 'modal-actions' },
+        h('button', { class: 'btn-ghost', onclick: () => { close(); if (back) back(); } }, 'Cancelar'),
+        h('button', { class: 'btn-primary', onclick: submit }, w ? 'Salvar' : 'Criar workspace')));
+    setTimeout(() => name.focus(), 0);
+  });
+}
+function duplicateWorkspace(w) {
+  let n = `${w.name} (cópia)`, i = 2;
+  while (data.workspaces.some((x) => x.name === n)) n = `${w.name} (cópia ${i++})`;
+  const copy = snapshotWorkspace(w);
+  delete copy.session; delete copy.snapshots; delete copy.lastRun;
+  copy.history = [];
+  data.workspaces.splice(data.workspaces.indexOf(w) + 1, 0, { id: uid('ws'), name: n, description: w.description || '', createdAt: Date.now(), data: copy });
+  persist();
+  toast(`“${n}” criado`);
+}
+async function deleteWorkspace(w) {
+  if (data.workspaces.length < 2) { toast('Precisa existir pelo menos um workspace.'); return false; }
+  const ok = await confirmModal({ title: `Excluir “${w.name}”?`, sub: `${statsText(wsStats(w))} e o histórico deste workspace serão apagados. Isso não pode ser desfeito.`, ok: 'Excluir workspace' });
+  if (!ok) return false;
+  if (w.id === data.activeWorkspaceId) switchWorkspace(data.workspaces.find((x) => x !== w).id, { quiet: true });
+  data.workspaces.splice(data.workspaces.indexOf(w), 1);
+  persist(); renderWorkspaceBtn();
+  toast(`Workspace “${w.name}” excluído`);
+  return true;
+}
+function openWorkspaces() {
+  openModal((body, close) => {
+    const list = h('div', { class: 'ws-list' });
+    const draw = () => {
+      list.innerHTML = '';
+      for (const w of data.workspaces) {
+        const on = w.id === data.activeWorkspaceId;
+        const more = h('button', { class: 'icon-btn', title: 'Mais ações', html: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.2" class="fill"/><circle cx="12" cy="12" r="1.2" class="fill"/><circle cx="19" cy="12" r="1.2" class="fill"/></svg>' });
+        more.addEventListener('click', (e) => {
+          e.stopPropagation();
+          showMenu(more, [
+            { label: 'Editar nome e descrição', run: () => openWorkspaceForm(w, { back: openWorkspaces }) },
+            { label: 'Duplicar', run: () => { duplicateWorkspace(w); draw(); } },
+            '-',
+            { label: 'Excluir…', run: async () => { await deleteWorkspace(w); openWorkspaces(); } },
+          ]);
+        });
+        list.append(h('div', { class: 'ws-row' + (on ? ' on' : ''), ondblclick: () => { if (!on) switchWorkspace(w.id); } },
+          h('div', { class: 'ws-avatar' }, (w.name.trim()[0] || '?').toUpperCase()),
+          h('div', { class: 'ws-info' },
+            h('div', { class: 'ws-title' }, w.name, on ? h('span', { class: 'ws-badge' }, 'Atual') : null),
+            w.description ? h('div', { class: 'ws-desc' }, w.description) : null,
+            h('div', { class: 'ws-stats' }, statsText(wsStats(w)))),
+          on ? null : h('button', { class: 'btn-ghost', onclick: () => switchWorkspace(w.id) }, 'Abrir'),
+          more));
+      }
+    };
+    draw();
+    body.append(
+      h('div', { class: 'ws-head' },
+        h('div', {}, h('h2', {}, 'Workspaces'),
+          h('p', { class: 'sub' }, 'Separe projetos e clientes: cada workspace tem coleções, ambientes, variáveis globais, histórico e abas próprios.')),
+        h('button', { class: 'btn-primary', onclick: () => openWorkspaceForm() }, '+ Novo workspace')),
+      list,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: close }, 'Fechar')));
+  });
+}
+
 // ---------- Persistência ----------
 let saveTimer;
 function persist() {
@@ -2546,6 +2712,7 @@ function bind() {
     if (/^\s*curl\s/i.test(text)) { e.preventDefault(); importCurl(text); }
   });
   $('#sendBtn').addEventListener('click', send);
+  $('#wsBtn').addEventListener('click', (e) => openWorkspaceMenu(e.currentTarget));
   initVarFields();
   initUpdates();
   $('#saveBtn').addEventListener('click', saveActive);
@@ -2671,14 +2838,13 @@ function initVarFields() {
 // ---------- Início ----------
 (async function init() {
   data = await api.load();
-  data.collections ||= []; data.history ||= []; data.environments ||= []; data.globals ||= { vars: [] };
-  const s = session();
-  s.tabs = s.tabs.filter((t) => t && t.draft);
-  if (!s.tabs.length) s.tabs.push({ id: uid('tab'), ref: null, draft: newRequest({ name: 'Exemplo', url: '{{baseUrl}}/get?ola=mundo', params: [{ key: 'ola', value: 'mundo', enabled: true }] }), dirty: false });
-  if (!s.tabs.some((t) => t.id === s.active)) s.active = s.tabs[0].id;
+  ensureWorkspaces();
+  if (!session().tabs.some((t) => t && t.draft)) session().tabs.push({ id: uid('tab'), ref: null, draft: newRequest({ name: 'Exemplo', url: '{{baseUrl}}/get?ola=mundo', params: [{ key: 'ola', value: 'mundo', enabled: true }] }), dirty: false });
+  normalizeWorkspace();
   document.body.classList.add('platform-' + (api.platform || 'web'));
   applyTheme();
   renderEnvSelect();
+  renderWorkspaceBtn();
   bind();
   initDivider();
   renderTabs(); renderRequest(); renderResponse(); renderSidebar();

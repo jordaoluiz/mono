@@ -25,6 +25,7 @@
   - [Importar uma API pela documentação](#importar-uma-api-pela-documentação)
   - [Visão geral da API, com diagramas](#visão-geral-da-api-com-diagramas)
   - [Variáveis e ambientes](#variáveis-e-ambientes)
+  - [Workspaces](#workspaces)
   - [Scripts e testes (API pm.* do Postman)](#scripts-e-testes-api-pm-do-postman)
   - [Collection Runner com CSV](#collection-runner-com-csv)
   - [Comparar ambientes](#comparar-ambientes)
@@ -51,6 +52,7 @@
 | SOAP | Corpo cru, sem WSDL | **Importa WSDL** e monta os envelopes; modelos da SEFAZ |
 | Certificado A1 (.pfx) | Por host, sem suporte a .pfx antigos | Por host, inclusive `.pfx` antigos (RC2) exportados pelo Windows |
 | Assinar XML (NF-e, eventos) | Não tem | **XMLDSig** no padrão fiscal, no botão ou por script |
+| Workspaces | Na nuvem, ligados à conta | Locais, cada um com coleções, ambientes, globais e histórico |
 | Ambientes | Variáveis | Variáveis, **comparação lado a lado** e **trava de produção** |
 | Tipos e código | Snippets de código | Snippets + **records C# / TypeScript / Zod** a partir da resposta |
 | Contrato | — | Avisa quando a resposta **muda de estrutura** ou foge do OpenAPI |
@@ -121,6 +123,16 @@ Ao digitar `{{` na URL, nos params ou nos headers, abre o autocompletar com o es
 
 - **Escopos:** globais › coleção › ambiente › variáveis do script (a mais específica vence).
 - **Segredos:** variáveis marcadas como segredo (cadeado) são criptografadas no disco pelo Windows (DPAPI) e nunca vão para exportações.
+
+### Workspaces
+
+Separe projetos e clientes em **workspaces**. O seletor fica no topo, ao lado do logo. Cada workspace tem as próprias coleções, ambientes, variáveis globais, histórico e abas abertas. Configurações (proxy, certificados, IA) e o tema valem para todos.
+
+![Workspaces](docs/screenshots/21-workspaces.png)
+
+- **Criar:** em *+ Novo workspace*, com nome, descrição e a opção de copiar os ambientes e as globais do workspace atual.
+- **Gerenciar:** abrir, renomear, duplicar (sem o histórico) e excluir.
+- **Trocar:** a troca não perde nada. As abas com alterações não salvas continuam lá quando você volta.
 
 ### Scripts e testes (API pm.* do Postman)
 
@@ -307,7 +319,7 @@ O GitHub Actions (`.github/workflows/release.yml`) roda os testes, gera o instal
 - **Interface isolada:** `contextIsolation` e `sandbox: true`, ponte `contextBridge` com funções explícitas, checagem do remetente em todo IPC e CSP restrita.
 - **Scripts:** rodam num Web Worker sem acesso ao app. `pm.sendRequest` e `pm.xml.sign` passam por funções controladas.
 - **Preview de HTML:** usa um protocolo próprio (`mono-preview://`) com scripts e formulários bloqueados.
-- **Segredos:** variáveis de segredo, senhas de proxy e de certificado e chaves de IA ficam criptografadas com o `safeStorage` (DPAPI no Windows).
+- **Segredos:** variáveis de segredo (de todos os workspaces), senhas de proxy e de certificado e chaves de IA ficam criptografadas com o `safeStorage` (DPAPI no Windows).
 - **Arquivos:** só são lidos os que você escolheu na janela do sistema. Coleções importadas não apontam para arquivos do seu computador.
 - **Dados:** ficam em `%APPDATA%\Mono\mono-data.json`. Nada é enviado para servidores do Mono, porque eles não existem.
 

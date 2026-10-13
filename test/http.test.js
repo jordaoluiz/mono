@@ -82,6 +82,10 @@ const fs = require('fs'); const os = require('os'); const path = require('path')
   st.save({ environments: [], settings: { proxy: { mode: 'custom', host: 'proxy.pwc', password: 'P@ss' } } });
   assert.ok(!fs.readFileSync(st.file, 'utf8').includes('P@ss'), 'senha do proxy não vai em claro para o disco');
   assert.strictEqual(st.load().settings.proxy.password, 'P@ss');
+  // Workspaces guardados (não ativos) também têm os segredos criptografados.
+  st.save({ environments: [], workspaces: [{ id: 'w1', name: 'Fiscal', data: { environments: [{ id: 'e2', name: 'Prod', vars: [{ key: 'senha', value: 'outr0', secret: true }] }] } }] });
+  assert.ok(!fs.readFileSync(st.file, 'utf8').includes('outr0'), 'segredo de workspace inativo não vai em claro');
+  assert.strictEqual(st.load().workspaces[0].data.environments[0].vars[0].value, 'outr0');
 
   server.close();
   console.log('ok — todos os testes passaram');
