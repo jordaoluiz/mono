@@ -20,12 +20,14 @@
 ## Sumário
 
 - [Por que o Mono](#por-que-o-mono)
+- [Como o Mono foi feito](#como-o-mono-foi-feito)
 - [Começando](#começando)
 - [Recursos](#recursos)
   - [Importar uma API pela documentação](#importar-uma-api-pela-documentação)
   - [Visão geral da API, com diagramas](#visão-geral-da-api-com-diagramas)
   - [Variáveis e ambientes](#variáveis-e-ambientes)
   - [Workspaces](#workspaces)
+  - [Trabalhar em equipe](#trabalhar-em-equipe)
   - [Scripts e testes (API pm.* do Postman)](#scripts-e-testes-api-pm-do-postman)
   - [Collection Runner com CSV](#collection-runner-com-csv)
   - [Comparar ambientes](#comparar-ambientes)
@@ -37,6 +39,7 @@
   - [Proxy corporativo, temas e o resto](#proxy-corporativo-temas-e-o-resto)
 - [Atalhos](#atalhos)
 - [Desenvolvimento](#desenvolvimento)
+- [Servidor do Mono (equipe)](#servidor-do-mono-equipe)
 - [Publicar uma versão](#publicar-uma-versão)
 - [Arquitetura e segurança](#arquitetura-e-segurança)
 
@@ -46,16 +49,22 @@
 
 | | Postman | Mono |
 |---|---|---|
-| Conta e nuvem | Login obrigatório para a maioria dos recursos | Nada sai do seu computador; dados em `%APPDATA%\Mono` |
+| Conta e nuvem | Login obrigatório para a maioria dos recursos | Funciona sem conta. Com conta, só os workspaces que você compartilhar vão para o servidor |
 | Importar API | OpenAPI e coleções | OpenAPI, Swagger UI, Redoc, apiDoc, Postman, **WSDL** e texto livre (com IA) |
 | Entender uma API nova | Ler a documentação | **Visão geral** gerada: para que serve, como usar, diagramas e variáveis |
 | SOAP | Corpo cru, sem WSDL | **Importa WSDL** e monta os envelopes; modelos da SEFAZ |
 | Certificado A1 (.pfx) | Por host, sem suporte a .pfx antigos | Por host, inclusive `.pfx` antigos (RC2) exportados pelo Windows |
 | Assinar XML (NF-e, eventos) | Não tem | **XMLDSig** no padrão fiscal, no botão ou por script |
-| Workspaces | Na nuvem, ligados à conta | Locais, cada um com coleções, ambientes, globais e histórico |
+| Workspaces | Na nuvem, ligados à conta | Locais ou **compartilhados por @**, com mudanças em tempo real |
 | Ambientes | Variáveis | Variáveis, **comparação lado a lado** e **trava de produção** |
 | Tipos e código | Snippets de código | Snippets + **records C# / TypeScript / Zod** a partir da resposta |
 | Contrato | — | Avisa quando a resposta **muda de estrutura** ou foge do OpenAPI |
+
+---
+
+## Como o Mono foi feito
+
+O Mono nasceu de uma **engenharia reversa do Postman feita com o REA**. O app do Postman foi analisado para entender como ele funciona por dentro, e as partes foram reimplementadas no Mono com código próprio: o formato das coleções, a API de scripts `pm.*`, o fluxo de variáveis e ambientes e a experiência de uso. Por isso o Mono importa e exporta coleções do Postman e roda os mesmos scripts. Por cima disso, ganhou o que faltava no dia a dia: SOAP com WSDL, certificado A1, assinatura de XML, trava de produção e visão geral de APIs.
 
 ---
 
@@ -133,6 +142,18 @@ Separe projetos e clientes em **workspaces**. O seletor fica no topo, ao lado do
 - **Criar:** em *+ Novo workspace*, com nome, descrição e a opção de copiar os ambientes e as globais do workspace atual.
 - **Gerenciar:** abrir, renomear, duplicar (sem o histórico) e excluir.
 - **Trocar:** a troca não perde nada. As abas com alterações não salvas continuam lá quando você volta.
+
+### Trabalhar em equipe
+
+Crie uma conta com um **@ único** e compartilhe um workspace. Para convidar, digite o @ da pessoa (o Mono sugere enquanto você digita). O convite chega na hora, com um aviso no seletor de workspace. Quem aceita vê o workspace no próprio Mono, e a partir daí **as mudanças de um aparecem para o outro em tempo real**: coleções, pastas, requisições salvas, ambientes e variáveis globais.
+
+![Pessoas no workspace](docs/screenshots/22-compartilhar.png)
+
+- **O que sincroniza:** o que está salvo. O rascunho de uma aba só vai quando você salva (Ctrl+S). Se o colega estiver com a mesma requisição aberta sem alterações, a aba dele atualiza sozinha.
+- **O que não sai do seu computador:** valores marcados como segredo (cadeado), histórico, abas abertas e a árvore aberta ou fechada.
+- **Conflitos:** cada item é gravado separado, então duas pessoas editando requisições diferentes não se atrapalham. Na mesma requisição, vale a última gravação.
+- **Sem internet:** você continua trabalhando, e as mudanças vão quando a conexão volta.
+- **Permissões:** quem criou o workspace remove pessoas e pode excluí-lo para todos. Quem sai ou é removido fica com uma cópia local.
 
 ### Scripts e testes (API pm.* do Postman)
 
@@ -291,14 +312,45 @@ src/
   xmlsign.js         assinatura XMLDSig
   updater.js         atualização automática
   store.js           dados em disco, segredos via safeStorage
+  cloud.js           conexão com o servidor do Mono (API + eventos em tempo real)
   preload.js         ponte mínima entre interface e processo principal
-  shared/            módulos sem dependências, usados na interface e nos testes
+  shared/            módulos sem dependências, usados na interface, no servidor e nos testes
                      (OpenAPI, apiDoc, Postman, WSDL, XML/C14N, scripts pm.*, codegen, runner…)
   renderer/          interface (HTML, CSS do design system, editor de scripts, variáveis)
+server/              servidor do Mono: contas, workspaces compartilhados, convites, SSE
 test/                testes em Node, sem frameworks
 ```
 
 O visual segue o design system descrito em [`DESIGN-SYSTEM.md`](DESIGN-SYSTEM.md).
+
+---
+
+## Servidor do Mono (equipe)
+
+O app não fala com o banco de dados. Ele fala com o **servidor do Mono** (`server/`), e só o servidor tem a string do MongoDB, numa variável de ambiente. Assim ninguém consegue tirar a senha do banco de dentro do instalador.
+
+**Rodar no seu computador** (para testar):
+
+```powershell
+cd server
+copy .env.example .env      # cole a MONGODB_URI do Atlas no .env (ele não vai para o Git)
+npm.cmd install
+npm.cmd run dev             # http://localhost:8787
+```
+
+**Publicar** (Render, já configurado em [`render.yaml`](render.yaml)):
+
+1. No [Render](https://render.com), escolha **New → Blueprint** e aponte para este repositório.
+2. Preencha `MONGODB_URI` quando o Render pedir.
+3. No Atlas, em **Network Access**, libere o acesso do servidor. No plano gratuito do Render o IP muda, então use `0.0.0.0/0`. A senha continua protegendo o banco.
+4. Use a URL do serviço (`https://mono-server-xxxx.onrender.com`) no campo **Servidor** da tela de conta, ou deixe-a como padrão em `MONO_CLOUD_URL` (`src/renderer/app.js`).
+
+**Segurança:**
+- **Senhas:** guardadas com scrypt.
+- **Sessões:** o app recebe um token de sessão (180 dias), guardado criptografado pelo Windows.
+- **Acesso aos workspaces:** só membros leem ou alteram um workspace.
+- **Validação:** o servidor confere cada alteração antes de gravar.
+- **Força bruta:** login e cadastro têm limite de tentativas.
 
 ---
 
@@ -321,7 +373,7 @@ O GitHub Actions (`.github/workflows/release.yml`) roda os testes, gera o instal
 - **Preview de HTML:** usa um protocolo próprio (`mono-preview://`) com scripts e formulários bloqueados.
 - **Segredos:** variáveis de segredo (de todos os workspaces), senhas de proxy e de certificado e chaves de IA ficam criptografadas com o `safeStorage` (DPAPI no Windows).
 - **Arquivos:** só são lidos os que você escolheu na janela do sistema. Coleções importadas não apontam para arquivos do seu computador.
-- **Dados:** ficam em `%APPDATA%\Mono\mono-data.json`. Nada é enviado para servidores do Mono, porque eles não existem.
+- **Dados:** ficam em `%APPDATA%\Mono\mono-data.json`. Só vão para o servidor do Mono os workspaces que você compartilhar, sem os segredos.
 
 ---
 
