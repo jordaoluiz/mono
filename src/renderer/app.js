@@ -1641,6 +1641,8 @@ function openOverview(col, { justImported = false, tried = null } = {}) {
     body.append(wrap, h('div', { class: 'modal-actions' }, h('button', { class: 'btn-primary', onclick: close }, 'Fechar')));
   });
   $('#modalBody').classList.add('wide', 'xl');
+  // abre no topo (o foco automático num campo da seção Variáveis rolava a janela para baixo)
+  setTimeout(() => { const m = $('#modalBody'); if (document.activeElement && m.contains(document.activeElement)) document.activeElement.blur(); m.scrollTop = 0; if (m.parentElement) m.parentElement.scrollTop = 0; }, 40);
 }
 const slug = (s) => String(s).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'colecao';
 function themeTokens() {

@@ -1,167 +1,316 @@
-# Mono
+<h1 align="center">mono</h1>
 
-Cliente de API minimalista em preto e branco, feito com Electron.
+<p align="center">
+  Cliente de APIs <b>REST e SOAP</b> para Windows, minimalista e em preto e branco.<br>
+  Inspirado no Postman, com o que faltava para quem trabalha com APIs no Brasil:<br>
+  certificado digital A1, webservices da SEFAZ e assinatura de XML.
+</p>
 
-## Rodar
+<p align="center">
+  <a href="https://github.com/jordaoluiz/mono/releases/latest"><b>⬇ Baixar o instalador</b></a> ·
+  <a href="#começando">Começando</a> ·
+  <a href="#recursos">Recursos</a> ·
+  <a href="#desenvolvimento">Desenvolvimento</a>
+</p>
 
-```powershell
-cd Documents\mono
-npm.cmd install
-npm.cmd start
-```
+![Tela principal do Mono](docs/screenshots/00-principal.png)
 
-Desenvolvimento com hot reload: `npm.cmd run dev`. Alterações na interface recarregam a janela (CSS é trocado sem recarregar), e alterações no processo principal ou no preload reiniciam o app.
+---
 
-Para rodar os testes do motor HTTP: `npm.cmd test`
+## Sumário
+
+- [Por que o Mono](#por-que-o-mono)
+- [Começando](#começando)
+- [Recursos](#recursos)
+  - [Importar uma API pela documentação](#importar-uma-api-pela-documentação)
+  - [Visão geral da API, com diagramas](#visão-geral-da-api-com-diagramas)
+  - [Variáveis e ambientes](#variáveis-e-ambientes)
+  - [Scripts e testes (API pm.* do Postman)](#scripts-e-testes-api-pm-do-postman)
+  - [Collection Runner com CSV](#collection-runner-com-csv)
+  - [Comparar ambientes](#comparar-ambientes)
+  - [Gerar tipos e gerar código](#gerar-tipos-e-gerar-código)
+  - [Corpo da requisição](#corpo-da-requisição)
+  - [SOAP, SEFAZ e certificado digital](#soap-sefaz-e-certificado-digital)
+  - [Assinatura digital de XML](#assinatura-digital-de-xml)
+  - [Trava de produção](#trava-de-produção)
+  - [Proxy corporativo, temas e o resto](#proxy-corporativo-temas-e-o-resto)
+- [Atalhos](#atalhos)
+- [Desenvolvimento](#desenvolvimento)
+- [Publicar uma versão](#publicar-uma-versão)
+- [Arquitetura e segurança](#arquitetura-e-segurança)
+
+---
+
+## Por que o Mono
+
+| | Postman | Mono |
+|---|---|---|
+| Conta e nuvem | Login obrigatório para a maioria dos recursos | Nada sai do seu computador; dados em `%APPDATA%\Mono` |
+| Importar API | OpenAPI e coleções | OpenAPI, Swagger UI, Redoc, apiDoc, Postman, **WSDL** e texto livre (com IA) |
+| Entender uma API nova | Ler a documentação | **Visão geral** gerada: para que serve, como usar, diagramas e variáveis |
+| SOAP | Corpo cru, sem WSDL | **Importa WSDL** e monta os envelopes; modelos da SEFAZ |
+| Certificado A1 (.pfx) | Por host, sem suporte a .pfx antigos | Por host, inclusive `.pfx` antigos (RC2) exportados pelo Windows |
+| Assinar XML (NF-e, eventos) | Não tem | **XMLDSig** no padrão fiscal, no botão ou por script |
+| Ambientes | Variáveis | Variáveis, **comparação lado a lado** e **trava de produção** |
+| Tipos e código | Snippets de código | Snippets + **records C# / TypeScript / Zod** a partir da resposta |
+| Contrato | — | Avisa quando a resposta **muda de estrutura** ou foge do OpenAPI |
+
+---
+
+## Começando
+
+### Instalar
+
+1. Baixe o `Mono-Setup-x.y.z.exe` em [Releases](https://github.com/jordaoluiz/mono/releases/latest).
+2. Execute. Como o instalador ainda não é assinado digitalmente, o Windows SmartScreen pode avisar: clique em **Mais informações › Executar assim mesmo**.
+3. O Mono cria atalhos no menu Iniciar e na área de trabalho e se atualiza sozinho quando sai uma versão nova.
+
+### Primeira requisição em 1 minuto
+
+1. Clique em **Importar API** (rodapé da barra lateral) e cole `https://restful-booker.herokuapp.com/apidoc/index.html`.
+2. O Mono monta a coleção, cria o ambiente com `{{baseUrl}}` e abre a visão geral da API.
+3. Abra **Auth › Create Token** e clique em **Enviar** (`Ctrl+Enter`). O token vai sozinho para `{{token}}`.
+4. As requisições protegidas já usam o token. É só enviar.
+
+---
 
 ## Recursos
 
-- Abas, coleções (renomear, duplicar, excluir) e histórico agrupado por dia.
-- Params sincronizados com a URL, headers, body (JSON / texto / form) e auth (Bearer / Basic).
-- Ambientes com `{{variaveis}}`. Variáveis marcadas como **segredo** são criptografadas no disco pelo cofre do sistema (DPAPI no Windows).
-- Resposta com números de linha e realce de JSON e HTML. A aba **Preview** mostra a página HTML (ou a imagem) renderizada, com scripts e formulários bloqueados.
-- Barra de título integrada no Windows: a faixa do topo é a área de arrastar, e os botões nativos seguem o tema.
-- Testes por requisição: `test()`, `expect()`, `res.json()`, `log()`. Rodam num Web Worker isolado, com limite de 3 s.
-- Colar um comando `curl` na barra de URL importa a requisição. "Copiar cURL" exporta.
-- Temas Escuro, Claro e Azul (menu no botão de tema). A resposta pode ficar embaixo ou ao lado da requisição (botão no topo, `Ctrl+Alt+L` ou duplo clique no divisor), e cada orientação lembra o próprio tamanho.
-- Atalhos: `Ctrl+Enter` envia, `Ctrl+S` salva, `Ctrl+T` abre nova aba, `Ctrl+W` fecha a aba.
+### Importar uma API pela documentação
 
-## Diferenciais
+![Importar API](docs/screenshots/01-importar-api.png)
 
-- **Comparar ambientes**: o botão *Comparar*, ao lado de *Enviar*, manda a mesma requisição para o ambiente ativo e para outro, ao mesmo tempo, e mostra lado a lado o status, o tempo e o tamanho de cada um, além de cada diferença no JSON (valor, tipo, campo só em um lado, tamanho de lista). Dá para ignorar campos voláteis, como `requestId` e `timestamp`, e filtrar só estrutura ou só valores.
-- **Trava de produção**: marque um ambiente como *produção* no editor de ambientes. O app ganha uma faixa de aviso, e POST, PUT, PATCH e DELETE pedem confirmação mostrando a URL final. GET passa direto.
-- **Gerar tipos**: o botão *Gerar tipos*, na resposta JSON, gera `record` em C# (com `JsonPropertyName`), `interface` em TypeScript ou schema Zod. Detecta campos opcionais, nulos, datas ISO, GUIDs e números grandes.
-- **O que mudou desde a última vez**: cada resposta JSON é comparada com a anterior do mesmo endpoint, no mesmo ambiente e status. Campo novo, campo removido ou tipo alterado aparecem em *Mudanças*, como um alarme de quebra de contrato sem teste nenhum.
-- **OpenAPI como fonte da verdade**: cada resposta é validada contra o schema documentado (tipos, obrigatórios, enum, nullable, campos não documentados), e o resultado aparece no selo *Contrato*. *Atualizar do OpenAPI*, no menu da coleção, traz endpoints novos.
+O **Importar API** aceita o link da documentação, um arquivo ou o conteúdo colado, e descobre sozinho onde está a especificação:
 
-## Importar API pela documentação
+- **OpenAPI 3 / Swagger 2** (JSON ou YAML), páginas **Swagger UI** e **Redoc**, e caminhos comuns como `/v3/api-docs` e `/swagger.json`;
+- **apiDoc** (`api_data.json`);
+- **WSDL** de webservices SOAP (`…/servico.asmx`, `…?wsdl`, `.svc`);
+- **coleções do Postman** (arquivo, link de coleção, documentação publicada ou workspace público) e exportações do Mono;
+- documentação em **texto livre**, lida com IA (Claude ou ChatGPT, com a sua chave em *Configurações › IA*).
 
-*Importar API*, no rodapé da barra lateral, aceita a **URL da documentação**, um arquivo ou um texto colado. O Mono descobre sozinho onde está a especificação:
+O resultado é uma coleção com uma pasta por grupo, bodies de exemplo, autenticação configurada e um ambiente com as variáveis. Endpoints de login ganham um script que guarda o token no ambiente.
 
-- OpenAPI 3 / Swagger 2 em JSON ou YAML, páginas Swagger UI e Redoc (lê o `url`/`spec-url` da página e tenta os caminhos comuns, como `/v3/api-docs` e `/swagger.json`);
-- apiDoc (`api_data.json`), como em `https://restful-booker.herokuapp.com/apidoc/index.html`;
-- coleções Postman v2.1 e coleções exportadas pelo Mono.
+### Visão geral da API, com diagramas
 
-O resultado:
+![Visão geral](docs/screenshots/02-visao-geral.png)
 
-- **Coleção montada**, com uma pasta por grupo/tag, body de exemplo e autenticação configurada. Endpoints de login ganham um teste `env.set('token', body.token)`, então o token vai para `{{token}}` sozinho. Um ambiente com `baseUrl` e `token` é criado e ativado.
-- **Visão geral** (ícone de livro na coleção, ou menu ⋯ › *Visão geral*), que pode ser reaberta a qualquer momento: para que a API serve, o que dá para fazer, como autenticar, passo a passo de uso, **diagrama de comunicação**, **fluxo típico** (diagrama de sequência) a tabela de endpoints (abre a requisição com um clique), as **variáveis** que a coleção usa, com botão para criá-las no ambiente, e o relatório da **importação** (origem, o que foi criado e onde o Mono procurou). Dá para exportar em HTML ou Markdown, e copiar cada diagrama como SVG.
-- **IA (opcional)**: em *Configurações › IA*, com uma chave do Claude (Anthropic) ou do ChatGPT (OpenAI), o Mono lê documentações em texto livre que não têm especificação e enriquece a visão geral. A chave fica criptografada no disco.
+Cada API importada ganha uma **Visão geral** (ícone de livro na coleção):
 
-Links do **postman.com** também funcionam: documentação publicada (`documenter.getpostman.com/view/…`), link de coleção e workspace público. Com uma chave da API do Postman (*Configurações › Postman*) o caminho é o oficial; sem chave, o Mono tenta o mesmo acesso público do site e, se o Postman exigir login, explica como exportar.
+- para que a API serve e o que dá para fazer com ela;
+- passo a passo de uso e como autenticar;
+- **diagrama de comunicação** e **fluxo típico** (diagrama de sequência);
+- tabela de endpoints (um clique abre a requisição);
+- variáveis que a coleção usa, com botão para **criá-las no ambiente**;
+- relatório da importação: origem, o que foi criado e onde o Mono procurou.
 
-## Scripts (como no Postman)
+Exporta em HTML ou Markdown, e cada diagrama copia como SVG.
 
-Aba **Scripts** da requisição, com **Antes da requisição** e **Após a resposta**. Coleções e pastas também têm scripts (menu ⋯ › *Scripts…*), e a ordem de execução é coleção → pastas → requisição.
+![Diagramas](docs/screenshots/03-diagramas.png)
 
-- API `pm.*` do Postman: `pm.environment`, `pm.collectionVariables`, `pm.globals`, `pm.variables`, `pm.request` (pode alterar URL, headers e body antes de enviar), `pm.response`, `pm.test`, `pm.expect` (estilo Chai), `pm.sendRequest`, `pm.cookies`, `pm.visualizer`, `pm.execution.skipRequest()`. Também aceita a sintaxe antiga (`postman.setEnvironmentVariable`, `tests[...]`).
-- Editor com números de linha, cores, autocompletar de `pm.` (Ctrl+Espaço), Ctrl+/ para comentar, **Snippets** e **Referência**.
-- Resultado nas abas **Testes**, **Console** e **Visualizar** da resposta. Erro no script mostra a linha.
-- Roda isolado num worker, sem acesso ao app. Variáveis dinâmicas: `{{$guid}}`, `{{$timestamp}}`, `{{$randomInt}}`, `{{$randomEmail}}`…
-- Variáveis em três escopos além do ambiente: **globais** (Ambientes › Globais) e **da coleção** (menu ⋯ › *Variáveis…*). Prioridade: script › ambiente › coleção › globais.
+![Como usar e variáveis](docs/screenshots/04-como-usar-variaveis.png)
 
-## Collection Runner
+### Variáveis e ambientes
 
-Menu ⋯ da coleção › *Executar coleção…* (ou ⋯ da pasta › *Executar pasta…*). Escolha as requisições e a ordem, o número de iterações e um intervalo entre requisições.
+`{{variáveis}}` aparecem em **azul** quando existem e em **vermelho** quando não existem. Passe o mouse para ver o valor, ou clique para editar ou criar a variável no ambiente, na coleção ou nas globais.
 
-- **Arquivo de dados** CSV (separador `,` `;` ou tab, aspas e quebras de linha) ou JSON (lista de objetos). Cada linha vira uma iteração; as colunas viram `{{variáveis}}` e ficam em `pm.iterationData`.
-- Scripts rodam como no envio normal. `pm.execution.setNextRequest("Nome")` muda a ordem, e `setNextRequest(null)` encerra a iteração.
-- O resultado mostra requisições, testes que passaram e falharam, erros e tempo médio, com filtro "Só falhas". Clicando numa linha aparecem os testes, o console e a resposta.
-- Exporta o relatório em HTML ou JSON. As variáveis que os scripts gravam vão para o ambiente ao final; dá para desligar.
-- Em ambiente de produção, pede confirmação antes de executar requisições que alteram dados.
+![Balão de variável](docs/screenshots/05-variavel-balao.png)
 
-## Corpo da requisição
+Ao digitar `{{` na URL, nos params ou nos headers, abre o autocompletar com o escopo e o valor de cada variável. `{{$guid}}`, `{{$timestamp}}`, `{{$randomInt}}` e outras variáveis dinâmicas aparecem com `{{$`.
 
-O tipo do corpo fica num seletor: JSON, **XML / SOAP**, texto, **form-data** (texto e arquivos), x-www-form-urlencoded e **binário** (um arquivo inteiro como corpo). O editor tem números de linha e cores.
+![Autocompletar](docs/screenshots/06-autocompletar.png)
 
-- **XML / SOAP**: modelos de envelope SOAP 1.1 e 1.2, e o modelo *SEFAZ · NF-e Status do Serviço 4.00*. O Content-Type é automático (`application/soap+xml` no SOAP 1.2, `text/xml` nos demais) e há um botão para formatar o XML.
-- **Arquivos** são lidos do disco na hora do envio. Por segurança, o Mono só lê arquivos escolhidos na janela do sistema neste computador: coleções importadas não conseguem apontar para outros arquivos.
+- **Escopos:** globais › coleção › ambiente › variáveis do script (a mais específica vence).
+- **Segredos:** variáveis marcadas como segredo (cadeado) são criptografadas no disco pelo Windows (DPAPI) e nunca vão para exportações.
 
-## Certificado digital (mTLS)
+### Scripts e testes (API pm.* do Postman)
 
-*Configurações › Certificados*: cadastre um certificado `.pfx`/`.p12` (ex.: A1 da empresa) para um host (`*.fazenda.sp.gov.br`). As requisições HTTPS para esse host apresentam o certificado automaticamente.
+![Scripts e testes](docs/screenshots/09-scripts-testes.png)
+
+A aba **Scripts** tem *Antes da requisição* e *Após a resposta*, com a mesma API do Postman: `pm.test`, `pm.expect` (estilo Chai), `pm.environment`, `pm.collectionVariables`, `pm.globals`, `pm.variables`, `pm.request` (alterável antes do envio), `pm.response`, `pm.sendRequest`, `pm.cookies`, `pm.visualizer` e `pm.execution`.
+
+- O editor tem números de linha, cores, autocompletar de `pm.` e `Ctrl+/` para comentar.
+- **Snippets** prontos e uma **Referência** da API ficam no canto do editor.
+- Coleções e pastas também têm scripts. A ordem de execução é coleção › pastas › requisição.
+- Os resultados aparecem nas abas **Testes**, **Console** e **Visualizar** da resposta. Erro no script mostra a linha.
+- Os scripts rodam isolados num Web Worker, sem acesso ao app nem aos seus arquivos.
+
+![Snippets](docs/screenshots/10-snippets.png)
+
+### Collection Runner com CSV
+
+![Runner: configuração](docs/screenshots/12-runner-config.png)
+
+Menu ⋯ da coleção › **Executar coleção** (ou de uma pasta). Escolha as requisições, a ordem, as iterações e um **arquivo de dados** CSV (aceita `;` do Excel) ou JSON. Cada linha vira uma iteração e cada coluna vira `{{variável}}` e `pm.iterationData`.
+
+![Runner: resultado](docs/screenshots/13-runner-resultado.png)
+
+- O resultado mostra requisições, testes que passaram e falharam, erros e tempo médio, com filtro "Só falhas".
+- Clicando numa linha aparecem os testes, o console e a resposta.
+- `pm.execution.setNextRequest()` muda a ordem da execução.
+- O relatório exporta em HTML ou JSON.
+
+### Comparar ambientes
+
+![Comparar ambientes](docs/screenshots/08-comparar-ambientes.png)
+
+O botão **Comparar** envia a mesma requisição para dois ambientes ao mesmo tempo (ex.: produção × homologação) e mostra lado a lado o status, o tempo e cada diferença no JSON: valor, tipo, campo que só existe de um lado. Dá para ignorar campos voláteis como `timestamp`.
+
+O Mono também guarda a estrutura da última resposta de cada endpoint e avisa em **Mudanças** quando aparece campo novo, some um campo ou muda um tipo. Com OpenAPI, a resposta é validada contra o contrato (selo **Contrato**).
+
+### Gerar tipos e gerar código
+
+![Gerar tipos](docs/screenshots/07-gerar-tipos.png)
+
+**Gerar tipos** transforma a resposta JSON em `record` C# (com `JsonPropertyName`), `interface` TypeScript ou schema Zod. Detecta campos opcionais, nulos, datas ISO e GUIDs.
+
+![Gerar código](docs/screenshots/11-gerar-codigo.png)
+
+**</> Código** gera a requisição em **cURL, C# (HttpClient), JavaScript (fetch e axios), Python (requests) e Power Automate** (ação HTTP).
+
+- Inclui headers, corpo (até form-data e arquivos), a autorização herdada da pasta ou coleção e o certificado digital do host.
+- No C#, pode incluir os records da última resposta e desserializar direto neles.
+
+### Corpo da requisição
+
+![Corpo JSON](docs/screenshots/14-body-json.png)
+
+O seletor de tipo oferece JSON, XML / SOAP, texto, **form-data** (campos e arquivos), x-www-form-urlencoded e **binário** (um arquivo como corpo). O editor é o mesmo dos scripts, com linhas e cores.
+
+Arquivos são lidos na hora do envio, e só os que você escolheu na janela do Windows. Uma coleção importada não consegue fazer o app enviar outros arquivos do seu computador.
+
+### SOAP, SEFAZ e certificado digital
+
+![SOAP com a SEFAZ](docs/screenshots/15-soap-sefaz.png)
+
+- **Importar WSDL:** cole o link do `.asmx`. O Mono busca o `?wsdl` e os XSD, cria uma requisição por operação e monta o envelope (SOAP 1.1 ou 1.2) com Content-Type e SOAPAction certos.
+- **Mensagens da NF-e:** nos serviços da NF-e 4.00 (status, consulta de protocolo, eventos, inutilização, cadastro, autorização), o corpo já vem com a mensagem de exemplo.
+- **Modelos SOAP:** envelopes 1.1 e 1.2 e o *Status do Serviço* da SEFAZ ficam no botão **Modelos SOAP** do Body.
+
+![Certificados](docs/screenshots/17-certificados.png)
+
+Em **Configurações › Certificados**, cadastre o `.pfx` (A1) para um host, como `*.fazenda.sp.gov.br`. As requisições HTTPS para ele usam o certificado automaticamente (mTLS), inclusive o download do WSDL.
 
 - Mostra o titular e a validade, com aviso perto do vencimento. A senha fica criptografada.
-- "CA do servidor" (opcional) serve para cadeias ICP-Brasil que o sistema não reconhece.
-- Usa o proxy HTTP do sistema ou o personalizado (túnel CONNECT). Proxy SOCKS não é suportado com certificado.
+- Lê `.pfx` modernos (AES), 3DES e os antigos com RC2, comuns em certificados exportados pelo Windows.
+- "CA do servidor" serve para cadeias ICP-Brasil que não forem reconhecidas.
+- Funciona atrás do proxy HTTP da empresa.
 
-## Gerar código
+### Assinatura digital de XML
 
-O botão **</> Código** gera a requisição atual em cURL, C# (HttpClient), JavaScript (fetch e axios), Python (requests) e Power Automate (ação HTTP).
+![Assinar XML](docs/screenshots/16-assinar-xml.png)
 
-- Inclui headers, corpo (até form-data e binário), autorização herdada e o certificado digital do host.
-- No C#, pode incluir os `record`s gerados a partir da última resposta e desserializar direto neles.
-- Dá para gerar com as `{{variáveis}}` resolvidas ou como texto.
+O botão **Assinar** (Body do tipo XML) aplica a assinatura **XMLDSig enveloped** no padrão dos documentos fiscais: C14N, `Reference URI="#Id"` e certificado no `KeyInfo`.
 
-## Instalador para Windows e atualização automática
+- **Algoritmo:** RSA-SHA1 para NF-e, NFC-e, CT-e e MDF-e; RSA-SHA256 para eSocial, Reinf e algumas NFS-e.
+- **Elemento:** o Mono sugere o elemento a assinar (`infNFe`, `infEvento`, `infInut`…) e assina todos os do lote.
+- **Formatação:** é removida antes de assinar, porque a SEFAZ rejeita quebras de linha entre as tags.
+- **Envelope SOAP:** quando o XML está dentro dele, só o documento fiscal entra na assinatura.
+- **Verificar** confere as assinaturas.
+- **Por script:** `await pm.xml.sign(pm.request.body.raw, 'infEvento')` assina antes de cada envio.
 
-Gerar o instalador local:
+### Trava de produção
 
-```
-npm.cmd install
-npm.cmd run dist
-```
+![Trava de produção](docs/screenshots/19-trava-producao.png)
 
-O instalador sai em `dist\Mono-Setup-<versão>.exe`. Ele cria atalhos no menu Iniciar e na área de trabalho, permite escolher a pasta e aparece em "Adicionar ou remover programas". Os dados continuam em `%APPDATA%\Mono` (os mesmos do `npm run dev`).
+Marque um ambiente como **produção**. O app mostra uma faixa de aviso, e POST, PUT, PATCH e DELETE pedem confirmação com a URL final. Vale também para o Runner.
 
-### Atualização automática (GitHub Releases)
+### Proxy corporativo, temas e o resto
 
-1. No `package.json`, troque `jordaoluiz` (em `repository` e `build.publish`) pelo seu usuário do GitHub e suba o projeto para um repositório **público** chamado `mono`. O atualizador não lê releases de repositório privado sem token.
-2. Para publicar uma versão: `npm.cmd version patch` e depois `git push --follow-tags`. O GitHub Actions (`.github/workflows/release.yml`) gera o instalador e publica o release.
-3. Os apps instalados procuram atualização ao abrir e a cada 4 horas, baixam em segundo plano e mostram o botão **Atualizar** no topo. *Configurações › Sobre* mostra a versão e permite procurar na hora.
+![Proxy](docs/screenshots/18-proxy.png)
 
-O instalador não é assinado digitalmente. Na primeira execução, o Windows SmartScreen pode avisar: use "Mais informações › Executar assim mesmo". Para tirar o aviso, é preciso um certificado de assinatura de código (Code Signing).
+- **Proxy:** do sistema (PAC/WPAD), personalizado (HTTP, HTTPS, SOCKS5, com usuário e senha) ou nenhum, com botão de teste.
+- **Requisições:** tempo limite, redirecionamentos e verificação SSL.
+- **Autorização** no padrão do Postman: herdar do pai, Bearer, Basic, API Key e OAuth 2.0 (client credentials e password, com renovação automática). Coleções e pastas têm a própria autorização.
+- **Organização:** pastas e subpastas com arrastar e soltar, histórico por dia e abas.
+- **Exportar:** coleção no formato Mono, Postman v2.1 ou OpenAPI. Segredos nunca são exportados.
+- **Resposta:** *Pretty* e *Raw* com detecção de linguagem (JSON, HTML, XML…), **Preview** de HTML e imagens, e resposta embaixo ou ao lado.
+- **cURL:** colar um `curl` na barra de URL monta a requisição.
+- **Temas:** escuro, claro e azul.
 
-## SOAP: importar WSDL
+![Temas: escuro, claro e azul](docs/screenshots/20-temas.png)
 
-*Importar API* aceita o link do WSDL (`…/servico.asmx?wsdl`, `…/servico.svc?wsdl`) ou só o `.asmx`/`.svc`, porque o Mono procura o `?wsdl` sozinho. Também aceita o arquivo `.wsdl` ou o conteúdo colado. Os XSD importados são buscados automaticamente.
+---
 
-- Cria uma requisição por operação, com o envelope SOAP montado a partir dos schemas (campos opcionais e repetições indicados em comentários, enumerações com o primeiro valor) e o Content-Type/SOAPAction certos. Quando o serviço oferece SOAP 1.1 e 1.2, usa o 1.2 (padrão da SEFAZ 4.00).
-- Nos serviços da NF-e 4.00 (status, consulta de protocolo, eventos, inutilização, consulta cadastro, autorização e retorno), o corpo já vem com a mensagem de exemplo.
-- Com o certificado A1 cadastrado para o host, o próprio download do WSDL já usa o certificado (muitos servidores da SEFAZ exigem).
+## Atalhos
 
-## Assinatura digital de XML (XMLDSig)
-
-No Body do tipo *XML / SOAP*, o botão **Assinar** aplica a assinatura "enveloped" no padrão dos documentos fiscais:
-
-- C14N 1.0, `Reference URI="#Id"`, transformações enveloped + C14N, e o certificado no `KeyInfo`;
-- RSA-SHA1 para NF-e, NFC-e, CT-e e MDF-e, ou RSA-SHA256 para eSocial, Reinf e algumas NFS-e;
-- o elemento a assinar (`infNFe`, `infEvento`, `infInut`…) é sugerido; todos os que existirem são assinados (lote com várias notas) e a assinatura anterior é substituída;
-- remove a formatação antes de assinar, porque a SEFAZ rejeita quebras de linha entre as tags. Com o XML dentro do envelope SOAP, só o documento fiscal entra na assinatura;
-- **Verificar** confere as assinaturas do corpo.
-
-Nos scripts, `await pm.xml.sign(xml, 'infEvento')` assina com o certificado configurado para o host da requisição. Há um snippet pronto em "Antes da requisição".
-
-Lê `.pfx` modernos (AES/PBES2), 3DES e os antigos com RC2, comuns em A1 exportados pelo Windows, inclusive no envio com certificado (mTLS).
-
-## Variáveis em destaque
-
-`{{variáveis}}` aparecem em azul na URL, params e headers (vermelho se não existem). Passe o mouse ou clique para ver e editar o valor, ou criar a variável no ambiente, na coleção ou nas globais.
-
-## Exportar
-
-Menu ⋯ da coleção › *Exportar…*: formato Mono (reimportável), Postman v2.1, especificação OpenAPI (quando a coleção veio de uma) ou visão geral em HTML. Valores secretos nunca são exportados.
-
-## Organização e configurações
-
-- **Pastas**: coleções aceitam pastas e subpastas (menu ⋯ › *Nova pasta*). Requisições e pastas podem ser arrastadas entre pastas e coleções, ou movidas por *Mover para…*. O título da requisição mostra o caminho. Importar API cria uma pasta por grupo/tag.
-- **Autorização** no padrão do Postman: *Herdar do pai*, *Sem autenticação*, *Bearer Token*, *Basic Auth*, *API Key* (header ou query) e *OAuth 2.0* (client credentials e password, com "Obter novo token" e renovação automática quando expira). Coleções e pastas têm a própria autorização (menu ⋯ › *Autorização…*), e as requisições novas herdam dela.
-- **Configurações** (engrenagem no topo), globais do usuário:
-  - **Proxy**: do sistema (inclui PAC/WPAD), personalizado (HTTP, HTTPS ou SOCKS5, com usuário e senha para proxy que responde 407 e lista de exceções) ou nenhum. Tem botão para testar a conexão.
-  - **Requisições**: tempo limite, seguir redirecionamentos e verificação de certificado SSL.
-  - As requisições saem por uma sessão própria do Chromium, então respeitam proxy e certificados. A senha do proxy é criptografada no disco.
-- **Resposta**: HTML e XML são indentados automaticamente (*Pretty*/*Raw*), com seletor de linguagem e cores de sintaxe.
-- **Design system**: veja `DESIGN-SYSTEM.md`.
-
-## Arquitetura (inspirada na análise do Postman, mas mais enxuta)
-
-| Postman | Mono |
+| Atalho | Ação |
 |---|---|
-| Runtime separado da interface (`postman-runtime`, workers) | Requisições rodam no processo principal (`src/http.js`), sem CORS |
-| `keytar` para guardar segredos | `safeStorage` do Electron (`src/store.js`) |
-| `tester_sandbox.html` | `test-worker.js`: Web Worker sem acesso ao app |
-| `@electron/remote` (ponte ampla, desaconselhada) | `contextBridge` com 6 funções, `sandbox: true`, checagem do remetente no IPC e CSP restrita |
-| Preview em webview | Preview por protocolo próprio (`mono-preview://`) com CSP `script-src 'none'` e iframe em sandbox |
-| Geradores de código | Exportar e importar cURL |
+| `Ctrl+Enter` | Enviar |
+| `Ctrl+S` | Salvar requisição |
+| `Ctrl+T` / `Ctrl+W` | Nova aba / fechar aba |
+| `Ctrl+Alt+L` | Resposta embaixo ou ao lado |
+| `{{` | Autocompletar variáveis |
+| `Ctrl+Espaço` | Autocompletar no editor de scripts |
+| `Ctrl+/` | Comentar linhas no editor |
 
-Os dados ficam em `%APPDATA%\Mono\mono-data.json`.
+---
+
+## Desenvolvimento
+
+Requisitos: Windows, [Node.js](https://nodejs.org) 20+ e Git.
+
+```powershell
+git clone https://github.com/jordaoluiz/mono.git
+cd mono
+npm.cmd install
+npm.cmd run dev
+```
+
+`npm run dev` liga o **hot reload**: mudanças na interface recarregam a janela (CSS sem recarregar) e mudanças no processo principal reiniciam o app.
+
+| Comando | O que faz |
+|---|---|
+| `npm.cmd start` | Abre o app |
+| `npm.cmd run dev` | Abre com hot reload |
+| `npm.cmd test` | Roda os testes (HTTP, scripts, importação, WSDL, assinatura, certificados…) |
+| `npm.cmd run dist` | Gera o instalador em `dist\Mono-Setup-<versão>.exe` |
+
+> No PowerShell use `npm.cmd`/`npx.cmd`: a política de execução padrão bloqueia os atalhos `.ps1`.
+
+### Estrutura
+
+```
+src/
+  main.js            processo principal: janela, IPC, arquivos, IA
+  http.js            monta e envia requisições (body, auth, multipart…)
+  network.js         sessão do Chromium com proxy e SSL
+  certs.js           mTLS com .pfx (A1) e túnel pelo proxy
+  pkcs12.js rc2.js   leitura de .pfx (inclusive RC2)
+  xmlsign.js         assinatura XMLDSig
+  updater.js         atualização automática
+  store.js           dados em disco, segredos via safeStorage
+  preload.js         ponte mínima entre interface e processo principal
+  shared/            módulos sem dependências, usados na interface e nos testes
+                     (OpenAPI, apiDoc, Postman, WSDL, XML/C14N, scripts pm.*, codegen, runner…)
+  renderer/          interface (HTML, CSS do design system, editor de scripts, variáveis)
+test/                testes em Node, sem frameworks
+```
+
+O visual segue o design system descrito em [`DESIGN-SYSTEM.md`](DESIGN-SYSTEM.md).
+
+---
+
+## Publicar uma versão
+
+```powershell
+npm.cmd version patch      # 0.1.1 → 0.1.2, cria o commit e a tag
+git push --follow-tags
+```
+
+O GitHub Actions (`.github/workflows/release.yml`) roda os testes, gera o instalador e publica em [Releases](https://github.com/jordaoluiz/mono/releases). Os apps instalados procuram atualização ao abrir e a cada 4 horas, baixam em segundo plano e mostram o botão **Atualizar** no topo. *Configurações › Sobre* mostra a versão e procura na hora.
+
+---
+
+## Arquitetura e segurança
+
+- **Requisições no processo principal:** sem CORS. Saem por uma sessão própria do Chromium que respeita proxy e SSL. Hosts com certificado A1 usam o `https` do Node.
+- **Interface isolada:** `contextIsolation` e `sandbox: true`, ponte `contextBridge` com funções explícitas, checagem do remetente em todo IPC e CSP restrita.
+- **Scripts:** rodam num Web Worker sem acesso ao app. `pm.sendRequest` e `pm.xml.sign` passam por funções controladas.
+- **Preview de HTML:** usa um protocolo próprio (`mono-preview://`) com scripts e formulários bloqueados.
+- **Segredos:** variáveis de segredo, senhas de proxy e de certificado e chaves de IA ficam criptografadas com o `safeStorage` (DPAPI no Windows).
+- **Arquivos:** só são lidos os que você escolheu na janela do sistema. Coleções importadas não apontam para arquivos do seu computador.
+- **Dados:** ficam em `%APPDATA%\Mono\mono-data.json`. Nada é enviado para servidores do Mono, porque eles não existem.
+
+---
+
+<p align="center"><sub>Feito por <a href="https://github.com/jordaoluiz">Luiz Jordão</a> · MIT</sub></p>
