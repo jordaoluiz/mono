@@ -1,7 +1,7 @@
 {
   "name": "mono-api-client",
   "productName": "Mono",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Cliente de APIs (REST e SOAP) em preto e branco",
   "main": "src/main.js",
   "scripts": {
