@@ -17,6 +17,8 @@ function createMemoryDb() {
     },
     async userByName(username) { for (const x of users.values()) if (x.username === username) return clone(x); return null; },
     async userById(id) { return clone(users.get(id) || null); },
+    async usersByIds(ids) { return ids.map((id) => users.get(id)).filter(Boolean).map(clone); },
+    async updateUser(id, fields) { const u = users.get(id); if (u) for (const [k, v] of Object.entries(fields)) { if (v === null) delete u[k]; else u[k] = clone(v); } },
     async searchUsers(prefix, limit) {
       return [...users.values()].filter((u) => u.username.startsWith(prefix)).sort((a, b) => a.username.localeCompare(b.username))
         .slice(0, limit).map((u) => ({ id: u.id, username: u.username, name: u.name || '' }));

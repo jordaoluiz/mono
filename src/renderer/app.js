@@ -171,7 +171,7 @@ function openWorkspaceMenu(anchor) {
   const cur = activeWorkspace();
   const items = [];
   items.push(loggedIn()
-    ? { label: h('span', { class: 'ws-mi acct' }, h('span', { class: 'ws-mi-av' }, (me().name || me().username)[0].toUpperCase()), h('span', { class: 'ws-mi-name' }, '@' + me().username), h('span', { class: 'cloud-dot ' + cloud.state })), run: () => openAccount() }
+    ? { label: h('span', { class: 'ws-mi acct' }, avatar({ userId: me().id, username: me().username, name: me().name }, 'md'), h('span', { class: 'ws-mi-name' }, '@' + me().username), h('span', { class: 'cloud-dot ' + cloud.state })), run: () => openAccount() }
     : { label: h('span', { class: 'ws-mi acct' }, h('span', { class: 'ws-mi-av off', html: ICON_PEOPLE }), h('span', { class: 'ws-mi-name' }, 'Entrar ou criar conta')), run: () => openAccount() });
   if (cloud.invites.length) {
     items.push('-');
@@ -435,6 +435,12 @@ function detachShared(w, msg) {
 function onCloudEvent({ event, data: p }) {
   if (!data) return;
   if (event === 'hello') { refreshInvites(); for (const w of sharedWs()) resync(w); presenceSent = ''; presenceTick(true); const aw = activeWorkspace(); if (aw.shared) { loadComments(aw); loadMonitorRuns(aw); } return; }
+  if (event === 'profile') {
+    cloud.profiles.set(p.user.id, p.user);
+    if (me() && p.user.id === me().id) { cloudCfg().user = { ...me(), ...p.user }; persist(); }
+    repaintAvatars();
+    return;
+  }
   if (event === 'invite') {
     cloud.invites = [p, ...cloud.invites.filter((i) => i.id !== p.id)];
     renderWorkspaceBtn();
@@ -489,12 +495,37 @@ function openAccount({ then = null } = {}) {
     const c = cloudCfg();
     if (loggedIn()) {
       const st = { online: 'Conectado', connecting: 'Conectando…', offline: 'Sem conexão — tentando de novo', off: 'Desconectado' }[cloud.state] || cloud.state;
+      const u = me();
+      const big = avatar({ userId: u.id, username: u.username, name: u.name }, 'xl');
+      const file = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', class: 'hidden' });
+      file.addEventListener('change', async () => {
+        const f = file.files[0]; file.value = '';
+        if (!f) return;
+        try { const data = await imageToAvatar(f); if (await saveProfile({ avatar: data })) { close(); openAccount(); toast('Foto atualizada', 1800); } }
+        catch (e) { toast(e.message, 3000); }
+      });
+      const nameIn = h('input', { value: u.name || '', placeholder: 'Seu nome (opcional)', maxlength: 60 });
+      const saveName = async () => { if ((nameIn.value.trim()) !== (me().name || '') && await saveProfile({ name: nameIn.value.trim() })) toast('Nome atualizado', 1600); };
+      nameIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') saveName(); });
+      nameIn.addEventListener('blur', saveName);
+      const cur = profileOf({ userId: u.id, username: u.username });
+      const swatches = h('div', { class: 'swatches' }, AVATAR_COLORS.map((col) => h('button', {
+        class: 'swatch' + ((cur.color || hashColor(u.username)) === col ? ' on' : ''), style: `background:${col}`, title: 'Usar esta cor',
+        onclick: async () => { if (await saveProfile({ color: col })) { close(); openAccount(); } },
+      })));
       body.append(
         h('h2', {}, 'Sua conta'),
         h('div', { class: 'acct-card' },
-          h('div', { class: 'ws-avatar big' }, (me().name || me().username)[0].toUpperCase()),
-          h('div', {}, h('div', { class: 'acct-name' }, me().name || me().username), h('div', { class: 'acct-user' }, '@' + me().username)),
+          h('div', { class: 'acct-av' }, big),
+          h('div', { class: 'grow' }, h('div', { class: 'acct-name' }, u.name || u.username), h('div', { class: 'acct-user' }, '@' + u.username)),
           h('span', { class: 'cloud-state ' + cloud.state }, h('span', { class: 'dot' }), st)),
+        h('div', { class: 'acct-edit' },
+          h('div', { class: 'field' }, h('label', {}, 'Foto'),
+            h('div', { class: 'row-gap' }, file,
+              h('button', { class: 'btn-ghost sm', onclick: () => file.click() }, cur.avatar ? 'Trocar foto' : 'Escolher foto'),
+              cur.avatar ? h('button', { class: 'btn-text sm', onclick: async () => { if (await saveProfile({ avatar: '' })) { close(); openAccount(); } } }, 'Remover foto') : null)),
+          h('div', { class: 'field' }, h('label', {}, cur.avatar ? 'Cor (usada se tirar a foto)' : 'Cor da inicial'), swatches),
+          h('div', { class: 'field' }, h('label', {}, 'Nome que os colegas veem'), nameIn)),
         h('p', { class: 'sub' }, plural(sharedWs().length, 'workspace compartilhado', 'workspaces compartilhados')),
         h('div', { class: 'modal-actions' },
           h('button', { class: 'btn-ghost', onclick: async () => { await cloudCall('POST', '/v1/logout'); cloudLoggedOut(); close(); toast('Você saiu da conta. Os workspaces continuam aqui, sem sincronizar.', 4000); } }, 'Sair da conta'),
@@ -600,7 +631,7 @@ function openShare(w) {
           openShare(w);
         } }, 'Remover'));
         list.append(h('div', { class: 'ws-row compact' },
-          h('div', { class: 'ws-avatar' }, (m.name || m.username)[0].toUpperCase()),
+          avatar(m, 'lg'),
           h('div', { class: 'ws-info' },
             h('div', { class: 'ws-title' }, m.name || '@' + m.username, self ? h('span', { class: 'ws-badge' }, 'você') : null),
             h('div', { class: 'ws-stats' }, '@' + m.username + ' · ' + (ROLE_LABEL[m.role] || 'pode editar'))),
@@ -619,7 +650,7 @@ function openShare(w) {
       }
       for (const i of w.shared.invites || []) {
         list.append(h('div', { class: 'ws-row compact pending' },
-          h('div', { class: 'ws-avatar' }, i.username[0].toUpperCase()),
+          h('span', { class: 'av lg pending' }, i.username[0].toUpperCase()),
           h('div', { class: 'ws-info' }, h('div', { class: 'ws-title' }, '@' + i.username), h('div', { class: 'ws-stats' }, `Convite enviado (${i.role === 'viewer' ? 'só leitura' : 'pode editar'}) — aguardando aceitar`))));
       }
     };
@@ -715,7 +746,78 @@ const myRole = (w) => (w && w.shared && me() ? ((w.shared.members || []).find((m
 const canEditWs = (w) => !w || !w.shared || myRole(w) !== 'viewer';
 const ROLE_LABEL = { owner: 'criou o workspace', editor: 'pode editar', viewer: 'só leitura' };
 const initialOf = (u) => String((u && (u.name || u.username)) || '?').trim()[0].toUpperCase();
-const avatar = (u, cls = '') => h('span', { class: 'av ' + cls, title: `${u.name ? u.name + ' · ' : ''}@${u.username}` }, initialOf(u));
+// Avatares: foto ou inicial na cor escolhida. Perfis (cor/foto) vêm do servidor e ficam em cache.
+const AVATAR_COLORS = ['#8ab4f8', '#f28b82', '#fbbc04', '#81c995', '#c58af9', '#78d9ec', '#fcad70', '#ff8bcb', '#a8a8a8'];
+const hashColor = (s) => { let x = 0; for (const ch of String(s || '')) x = (x * 31 + ch.charCodeAt(0)) >>> 0; return AVATAR_COLORS[x % (AVATAR_COLORS.length - 1)]; };
+cloud.profiles = new Map(); // userId → { username, name, color, avatar }
+const uidOf = (u) => (u && (u.userId || u.id)) || '';
+function profileOf(u) {
+  const id = uidOf(u);
+  const p = (id && cloud.profiles.get(id)) || (me() && id === me().id ? me() : null) || {};
+  return { username: p.username || (u && u.username) || '', name: p.name || (u && u.name) || '', color: p.color || '', avatar: p.avatar || '' };
+}
+function paintAvatar(el, u) {
+  const p = profileOf(u);
+  el.textContent = '';
+  el.style.background = '';
+  if (p.avatar) { el.classList.add('has-img'); el.append(h('img', { src: p.avatar, alt: '' })); }
+  else { el.classList.remove('has-img'); el.textContent = initialOf(p.username ? p : u); el.style.background = p.color || hashColor(p.username || (u && u.username)); el.style.color = '#0b0b0b'; }
+}
+function avatar(u, cls = '') {
+  const el = h('span', { class: 'av ' + cls, 'data-uid': uidOf(u) || null, title: `${u.name ? u.name + ' · ' : ''}@${u.username}` });
+  paintAvatar(el, u);
+  if (uidOf(u)) ensureProfiles([uidOf(u)]);
+  return el;
+}
+const profileWanted = new Set(), profileTried = new Set();
+let profileTimer = null;
+function ensureProfiles(ids) {
+  if (!loggedIn()) return;
+  for (const id of ids) if (id && !cloud.profiles.has(id) && !profileTried.has(id)) profileWanted.add(id);
+  if (!profileWanted.size || profileTimer) return;
+  profileTimer = setTimeout(async () => {
+    profileTimer = null;
+    const list = [...profileWanted].slice(0, 100);
+    list.forEach((id) => { profileWanted.delete(id); profileTried.add(id); });
+    const r = await cloudCall('GET', `/v1/profiles?ids=${encodeURIComponent(list.join(','))}`);
+    if (r.ok) { for (const u of r.data.users) cloud.profiles.set(u.id, u); repaintAvatars(); }
+  }, 60);
+}
+function repaintAvatars() {
+  $$('.av[data-uid]').forEach((el) => paintAvatar(el, { userId: el.dataset.uid, username: (el.title.match(/@([\w.]+)/) || [])[1] || '' }));
+}
+// Foto escolhida no computador → recorte quadrado de 128 px em WebP (fica pequena para ir ao servidor).
+function imageToAvatar(file) {
+  return new Promise((resolve, reject) => {
+    if (!/^image\//.test(file.type)) return reject(new Error('Escolha uma imagem (PNG, JPG ou WebP).'));
+    if (file.size > 15 * 1024 * 1024) return reject(new Error('Imagem grande demais.'));
+    const img = new Image();
+    img.onload = () => {
+      const side = Math.min(img.naturalWidth, img.naturalHeight);
+      const c = document.createElement('canvas'); c.width = c.height = 128;
+      const g = c.getContext('2d'); g.imageSmoothingQuality = 'high';
+      g.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 128, 128);
+      let q = 0.86, out = c.toDataURL('image/webp', q);
+      while (out.length > 85000 && q > 0.4) { q -= 0.12; out = c.toDataURL('image/webp', q); }
+      if (!/^data:image\/webp/.test(out)) out = c.toDataURL('image/jpeg', 0.85);
+      resolve(out);
+    };
+    img.onerror = () => reject(new Error('Não consegui abrir essa imagem.'));
+    // data: (e não blob:) porque a CSP do app só libera imagens 'self' e data:
+    const fr = new FileReader();
+    fr.onload = () => { img.src = fr.result; };
+    fr.onerror = () => reject(new Error('Não consegui ler o arquivo.'));
+    fr.readAsDataURL(file);
+  });
+}
+async function saveProfile(fields) {
+  const r = await cloudCall('PATCH', '/v1/me', fields);
+  if (!r.ok) { toast(r.error, 3500); return false; }
+  cloudCfg().user = { ...me(), ...r.data.user };
+  cloud.profiles.set(r.data.user.id, r.data.user);
+  persist(); repaintAvatars(); renderWorkspaceBtn();
+  return true;
+}
 const ago = (t) => {
   const s = Math.round((Date.now() - new Date(t).getTime()) / 1000);
   if (s < 45) return 'agora';

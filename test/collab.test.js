@@ -126,6 +126,21 @@ async function until(fn, ms = 3000) {
   assert.strictEqual(mon.data.run.failures[0].error, 'cStat 108');
   assert.strictEqual((await caio.call('GET', `/v1/workspaces/${ws.id}/monitor-runs`)).data.runs.length, 1);
 
+  // perfil: cor e foto chegam para quem divide workspace
+  const png = 'data:image/png;base64,' + Buffer.from('fake-png').toString('base64');
+  r = await bia.call('PATCH', '/v1/me', { color: '#ff8800', avatar: png, name: 'Bia L.' });
+  assert.ok(r.ok, r.error); assert.strictEqual(r.data.user.avatar, png);
+  const prof = await until(() => ana.events.find((e) => e.event === 'profile' && e.data.user.username === 'bia'));
+  assert.strictEqual(prof.data.user.color, '#ff8800');
+  assert.strictEqual((await bia.call('PATCH', '/v1/me', { avatar: 'data:text/html;base64,PHNjcmlwdD4=' })).status, 400, 'só imagem');
+  assert.strictEqual((await bia.call('PATCH', '/v1/me', { color: 'red; x' })).status, 400);
+  assert.strictEqual((await bia.call('PATCH', '/v1/me', { avatar: 'data:image/png;base64,' + 'A'.repeat(100000) })).status, 400, 'limite de tamanho');
+  const profs = (await ana.call('GET', `/v1/profiles?ids=${bia.id},${caio.id}`)).data.users;
+  assert.deepStrictEqual(profs.map((u) => [u.username, !!u.avatar]), [['bia', true], ['caio', false]]);
+  assert.ok(!JSON.stringify(profs).includes('passHash'));
+  r = await bia.call('PATCH', '/v1/me', { avatar: '' });
+  assert.strictEqual(r.data.user.avatar, '');
+
   // excluir o workspace limpa histórico, comentários e monitores
   assert.ok((await ana.call('DELETE', `/v1/workspaces/${ws.id}`)).ok);
   assert.strictEqual((await db.listChanges(ws.id)).length, 0);

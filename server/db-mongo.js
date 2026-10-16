@@ -46,6 +46,12 @@ function createMongoDb(uri, dbName = 'mono') {
     async createUser(u) { try { await users.insertOne(toDoc({ ...u, createdAt: new Date(u.createdAt) })); } catch (e) { throw dupOf(e); } },
     async userByName(username) { return fromDoc(await users.findOne({ username })); },
     async userById(id) { return fromDoc(await users.findOne({ _id: id })); },
+    async usersByIds(ids) { return (await users.find({ _id: { $in: ids } }, { projection: { passHash: 0 } }).toArray()).map(fromDoc); },
+    async updateUser(id, fields) {
+      const set = {}, unset = {};
+      for (const [k, v] of Object.entries(fields)) { if (v === null) unset[k] = ''; else set[k] = v; }
+      await users.updateOne({ _id: id }, { ...(Object.keys(set).length ? { $set: set } : {}), ...(Object.keys(unset).length ? { $unset: unset } : {}) });
+    },
     async searchUsers(prefix, limit) {
       const list = await users.find({ username: { $regex: '^' + escRe(prefix) } }, { projection: { username: 1, name: 1 } })
         .sort({ username: 1 }).limit(limit).toArray();

@@ -31,7 +31,11 @@ async function checkPassword(pw, stored) {
 }
 const DUMMY_HASH = 'scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA==$' + Buffer.alloc(64).toString('base64');
 
-const publicUser = (u) => ({ id: u.id, username: u.username, name: u.name || '' });
+const publicUser = (u) => ({ id: u.id, username: u.username, name: u.name || '', color: u.color || '', avatar: u.avatar || '' });
+// Avatar: imagem pequena (o app recorta e reduz para 128×128) guardada como data URL; ou só a cor da inicial.
+const AVATAR_RE = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/;
+const MAX_AVATAR = 90 * 1024;
+const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 const summary = (w) => ({ id: w.id, name: w.name, description: w.description || '', ownerId: w.ownerId, members: w.members, version: w.version, updatedAt: w.updatedAt });
 
 function createApp({ db, log = () => {}, now = () => new Date() }) {
@@ -176,6 +180,28 @@ function createApp({ db, log = () => {}, now = () => new Date() }) {
 
   route('POST', '/v1/logout', async ({ me }) => { await db.deleteSession(me.tokenHash); return { ok: true }; });
   route('GET', '/v1/me', async ({ me }) => ({ user: publicUser(me.user) }));
+
+  // Perfil: nome, cor e foto. Quem divide workspace com a pessoa recebe a mudança na hora.
+  route('PATCH', '/v1/me', async ({ body, me }) => {
+    const fields = {};
+    if (body.name !== undefined) fields.name = cleanName(body.name, 60);
+    if (body.color !== undefined) { if (body.color && !COLOR_RE.test(body.color)) fail(400, 'Cor inválida.'); fields.color = body.color || null; }
+    if (body.avatar !== undefined) {
+      if (body.avatar && (!AVATAR_RE.test(body.avatar) || body.avatar.length > MAX_AVATAR)) fail(400, 'Imagem inválida ou grande demais (até 90 KB, PNG, JPEG ou WebP).');
+      fields.avatar = body.avatar || null;
+    }
+    await db.updateUser(me.user.id, fields);
+    const user = publicUser(await db.userById(me.user.id));
+    const peers = new Set([me.user.id]);
+    for (const w of await db.listWorkspacesFor(me.user.id)) for (const m of w.members) peers.add(m.userId);
+    emit([...peers], 'profile', { user });
+    return { user };
+  });
+  // Perfis (cor e foto) de quem aparece no app: membros, autores de comentários e do histórico.
+  route('GET', '/v1/profiles', async ({ query }) => {
+    const ids = String(query.get('ids') || '').split(',').map((s) => s.trim()).filter((s) => s && s.length <= 80).slice(0, 100);
+    return { users: (await db.usersByIds(ids)).map(publicUser) };
+  });
 
   route('GET', '/v1/users', async ({ query, me }) => {
     const q = Sync.normUser(query.get('q'));

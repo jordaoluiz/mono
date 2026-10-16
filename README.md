@@ -171,6 +171,8 @@ Crie uma conta com um **@ único** e compartilhe um workspace. Para convidar, di
 
 **Presença:** os avatares no topo mostram quem está no workspace agora. Na árvore e nas abas, aparece quem está com cada requisição aberta.
 
+**Avatar:** em **Sua conta** (menu do workspace), escolha uma foto do computador ou a cor da inicial e o nome que os colegas veem. O Mono recorta e reduz a foto, e a mudança aparece na hora para todo mundo que divide workspace com você.
+
 ### Monitores
 
 Um monitor roda uma coleção ou pasta de tempos em tempos (a cada 5 minutos, 15 minutos, 1 hora…) e avisa com uma notificação do Windows quando algo falha e quando volta. Um exemplo é o status da SEFAZ a cada 15 minutos.
