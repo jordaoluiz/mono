@@ -12,6 +12,7 @@ const { createCloud } = require('./cloud');
 const { createMock } = require('./mock');
 const { createRealtime } = require('./realtime');
 const { createGitDir } = require('./gitdir');
+const { createRespLog } = require('./resplog');
 
 // Arquivos que a interface pode mandar numa requisição (form-data, binário, certificados):
 // só os que o usuário escolheu na janela do sistema. Coleções importadas não conseguem apontar para outros arquivos.
@@ -234,6 +235,21 @@ app.whenReady().then(() => {
   ipcMain.handle('git:watch', guard(({ dir }) => gitdir.watch(dir)));
   ipcMain.handle('git:unwatch', guard(({ dir }) => gitdir.unwatch(dir)));
   app.on('before-quit', () => gitdir.closeAll());
+
+  // Respostas guardadas por requisição (comparar hoje × ontem, homologação × produção).
+  const resplog = createRespLog(path.join(app.getPath('userData'), 'responses'), {
+    available: () => safeStorage.isEncryptionAvailable(),
+    encrypt: (s) => safeStorage.encryptString(s).toString('base64'),
+    decrypt: (b) => safeStorage.decryptString(Buffer.from(b, 'base64')),
+  });
+  const rkey = (k) => { const s = String(k || ''); if (!s || s.length > 3000) throw new Error('Chave inválida.'); return s; };
+  ipcMain.handle('resp:add', guard(({ key, entry }) => resplog.add(rkey(key), entry || {})));
+  ipcMain.handle('resp:list', guard(({ key }) => resplog.list(rkey(key))));
+  ipcMain.handle('resp:get', guard(({ key, ids }) => resplog.get(rkey(key), Array.isArray(ids) ? ids.slice(0, 10).map(String) : [])));
+  ipcMain.handle('resp:update', guard(({ key, id, patch }) => resplog.update(rkey(key), String(id), patch || {})));
+  ipcMain.handle('resp:remove', guard(({ key, id }) => resplog.remove(rkey(key), String(id))));
+  ipcMain.handle('resp:clear', guard(({ key }) => resplog.clear(rkey(key))));
+  ipcMain.handle('resp:rename', guard(({ from, to }) => { resplog.rename(rkey(from), rkey(to)); return true; }));
   // WebSocket e SSE: a interface manda a requisição; aqui ela é montada (variáveis, auth) e a conexão fica aberta.
   const realtime = createRealtime({ emit: (e) => { if (win && !win.isDestroyed()) win.webContents.send('rt:event', e); }, ...network.realtimeOptions() });
   ipcMain.handle('rt:connect', guard(({ id, kind, req, vars }) => {

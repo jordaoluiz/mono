@@ -141,6 +141,15 @@ async function until(fn, ms = 3000) {
   r = await bia.call('PATCH', '/v1/me', { avatar: '' });
   assert.strictEqual(r.data.user.avatar, '');
 
+  // fluxos sincronizam com o workspace e entram no histórico
+  const flow = { id: 'flow1', name: 'Pedido completo', nodes: [{ id: 'n1', type: 'start', x: 0, y: 0 }], edges: [] };
+  r = await bia.call('POST', `/v1/workspaces/${ws.id}/ops`, { clientId: bia.clientId, ops: [{ t: 'flow', id: 'flow1', v: flow }] });
+  assert.ok(r.ok, r.error); assert.match(r.data.change.summary, /criou o fluxo Pedido completo/);
+  await until(() => ana.events.find((e) => e.event === 'ops' && e.data.ops && e.data.ops.some((o) => o.t === 'flow')));
+  w = (await ana.call('GET', `/v1/workspaces/${ws.id}`)).data.workspace;
+  assert.strictEqual(w.data.flows[0].name, 'Pedido completo');
+  assert.strictEqual((await bia.call('POST', `/v1/workspaces/${ws.id}/ops`, { clientId: bia.clientId, ops: [{ t: 'flow', id: 'x', v: { id: 'x' } }] })).status, 400);
+
   // excluir o workspace limpa histórico, comentários e monitores
   assert.ok((await ana.call('DELETE', `/v1/workspaces/${ws.id}`)).ok);
   assert.strictEqual((await db.listChanges(ws.id)).length, 0);

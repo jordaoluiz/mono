@@ -25,6 +25,15 @@ contextBridge.exposeInMainWorld('mono', {
   checkUpdate: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   onUpdate: (cb) => { const fn = (_e, s) => cb(s); ipcRenderer.on('update:status', fn); return () => ipcRenderer.removeListener('update:status', fn); },
+  responses: {
+    add: (key, entry) => ipcRenderer.invoke('resp:add', { key, entry }),
+    list: (key) => ipcRenderer.invoke('resp:list', { key }),
+    get: (key, ids) => ipcRenderer.invoke('resp:get', { key, ids }),
+    update: (key, id, patch) => ipcRenderer.invoke('resp:update', { key, id, patch }),
+    remove: (key, id) => ipcRenderer.invoke('resp:remove', { key, id }),
+    clear: (key) => ipcRenderer.invoke('resp:clear', { key }),
+    rename: (from, to) => ipcRenderer.invoke('resp:rename', { from, to }),
+  },
   git: {
     pickDir: (opts) => ipcRenderer.invoke('git:pickDir', opts),
     write: (opts) => ipcRenderer.invoke('git:write', opts),

@@ -102,7 +102,7 @@ const fill = (s, vars) => String(s || '').replace(/\{\{\s*(\$?[\w.-]+)\s*\}\}/g,
 // Cada workspace tem suas coleções, ambientes, globais, histórico e abas. O ativo fica no topo de `data`
 // (o resto do app não precisa saber que workspaces existem); os outros ficam guardados em workspaces[].data.
 // Configurações (proxy, certificados, IA) e o tema valem para todos.
-const WS_KEYS = ['collections', 'history', 'environments', 'activeEnvId', 'globals', 'session', 'snapshots', 'lastRun', 'monitors', 'cookies'];
+const WS_KEYS = ['collections', 'history', 'environments', 'activeEnvId', 'globals', 'session', 'snapshots', 'lastRun', 'monitors', 'cookies', 'flows', 'flowLast'];
 const activeWorkspace = () => data.workspaces.find((w) => w.id === data.activeWorkspaceId);
 function ensureWorkspaces() {
   data.workspaces ||= [];
@@ -143,6 +143,7 @@ function switchWorkspace(id, { quiet = false } = {}) {
   data.activeWorkspaceId = id;
   for (const t of session().tabs) liveCloseTab(t);
   for (const k of Object.keys(runtime)) delete runtime[k];
+  if (flowUi && flowUi.id) closeFlow();
   $('#modal').classList.add('hidden');
   $('#sideSearch').value = '';
   normalizeWorkspace();
@@ -363,6 +364,14 @@ function applyRemote(w, ops) {
   if (data.activeEnvId && !envById(data.activeEnvId)) data.activeEnvId = data.environments[0]?.id || '';
   renderSidebar(); renderTabs(); renderEnvSelect();
   if (!activeTab()?.dirty) renderRequest();
+  if (flowOpen() && ops.some((o) => o.t.startsWith('flow') || o.t.startsWith('req') || o.t.startsWith('col'))) refreshFlowSoon();
+  else if (flowUi && flowUi.id && !flowById(flowUi.id)) { toast('Um colega excluiu este fluxo.', 2600); closeFlow(); }
+}
+// Atualiza o quadro com o que veio do time sem tirar o foco de um campo que a pessoa está editando.
+function refreshFlowSoon() {
+  const a = document.activeElement;
+  if (a && a.closest && a.closest('#flowView') && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) { a.addEventListener('blur', () => setTimeout(() => flowOpen() && renderFlow(), 0), { once: true }); return; }
+  renderFlow();
 }
 function drain(w) {
   const id = w.shared.id;
@@ -1446,6 +1455,7 @@ function openTab(req, ref = null) {
   focusTab(tab.id);
 }
 function focusTab(id) {
+  if (flowUi && flowUi.id) closeFlow();
   session().active = id;
   persist();
   renderTabs(); renderRequest(); renderResponse(); renderSidebar();
@@ -1889,7 +1899,7 @@ async function runnerExec(col, reqObj, ctx) {
   const res = await api.send(req, vars);
   takeCookies(req, res, vars);
   rec.method = req.method; rec.url = (res.request && res.request.url) || fill(req.url, vars); rec.time = res.time ?? null;
-  if (!res.ok) { rec.error = res.error; return { rec, next }; }
+  if (!res.ok) { rec.error = res.error; return { rec, next, res }; }
   Object.assign(rec, { status: res.status, statusText: res.statusText, size: res.size, contentType: res.contentType, body: res.body ? res.body.slice(0, 20000) : null, truncated: !!(res.body && res.body.length > 20000) });
   const post = scriptChain(tab, req, 'tests');
   if (post.length) {
@@ -1898,7 +1908,7 @@ async function runnerExec(col, reqObj, ctx) {
     if (out.nextRequest !== undefined) next = out.nextRequest;
     if (out.error) rec.error = scriptErrorText('Após a resposta', out.error);
   }
-  return { rec, next };
+  return { rec, next, res };
 }
 const recFailed = (r) => !!r.error || (r.tests || []).some((t) => !t.pass && !t.skipped);
 
@@ -2288,7 +2298,7 @@ async function send() {
   const col = tabCol(tab);
   const prevScripts = state.scripts;
   state.loading = true; state.compare = null;
-  if (resTab === 'compare') resTab = 'body';
+  if (resTab === 'compare' || resTab === 'saved') resTab = 'body';
   renderResponse();
   const run = { pre: null, post: null };
   const info = { requestName: req.name, requestId: tab.ref?.reqId || null };
@@ -2334,6 +2344,9 @@ async function send() {
   }
   if (toastVars.length) toast(`${[...new Set(toastVars)].map((k) => `{{${k}}}`).join(', ')} salvo em "${env.name}"`, 2600);
   await afterResponse(tab, req, res, env);
+  state.liveResponse = null;
+  const savedEntry = await recordResponse(respKey(tab), req, res, env);
+  if (savedEntry) res.savedId = savedEntry.id;
   if (run.post?.visualizer && resTab === 'body') resTab = 'visualize';
   if (state.changes?.list.length && resTab === 'body') resTab = 'changes';
   addHistory(req, res, env);
@@ -2760,6 +2773,717 @@ function openMonitors(w = activeWorkspace()) {
   });
 }
 
+// ---------- Fluxos visuais ----------
+// Quadro com blocos (requisição, condição, repetir, definir, esperar) ligados por setas. Os valores saem de uma
+// resposta ({{token}}) e entram nas próximas. Fica no workspace (sincroniza com o time); a execução é local.
+const Flows = window.MonoFlows;
+const FN_W = 224, FN_H = 76;
+const flowsOf = () => (data.flows ||= []);
+const flowById = (id) => flowsOf().find((f) => f.id === id) || null;
+const flowLast = () => (data.flowLast ||= {}); // flowId → { at, ok, ms, requests, failed, error } (deste computador)
+let flowUi = null; // { id, sel, selEdge, view: { x, y, z }, panel, run, drag }
+const FLOW_ICON = {
+  start: '<svg viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z"/></svg>',
+  request: '<svg viewBox="0 0 24 24"><path d="M4 12h12m0 0-4-4m4 4-4 4"/><path d="M20 5v14"/></svg>',
+  condition: '<svg viewBox="0 0 24 24"><path d="M12 3 21 12l-9 9-9-9z"/></svg>',
+  loop: '<svg viewBox="0 0 24 24"><path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12"/><path d="M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/></svg>',
+  set: '<svg viewBox="0 0 24 24"><path d="M5 8h14M5 16h14"/><path d="M10 4 8 20M16 4l-2 16"/></svg>',
+  delay: '<svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg>',
+};
+const FLOW_HELP = {
+  request: 'Envia uma requisição da coleção e guarda valores da resposta em variáveis.',
+  condition: 'Segue por "sim" ou "não" conforme o valor de uma variável.',
+  loop: 'Repete os blocos ligados em "cada": N vezes, para cada item de uma lista ou enquanto uma condição valer.',
+  set: 'Cria ou muda variáveis do fluxo.',
+  delay: 'Espera um tempo antes de seguir.',
+};
+
+function flowNodeTitle(n) {
+  if (n.type === 'request') { const f = findRef(n.ref); return f ? f.req.name : n.ref ? 'Requisição excluída' : 'Escolha a requisição'; }
+  if (n.type === 'start') return 'Início';
+  if (n.title) return n.title;
+  return Flows.TYPES[n.type]?.label || n.type;
+}
+function flowNodeSummary(n) {
+  if (n.type === 'start') { const k = (n.assign || []).filter((a) => a.key).map((a) => a.key); return k.length ? 'variáveis: ' + k.join(', ') : 'começa aqui'; }
+  if (n.type === 'request') { const f = findRef(n.ref); const ex = (n.extract || []).filter((x) => x.var).map((x) => `{{${x.var}}}`); return ex.length ? '→ ' + ex.join(' ') : f ? (f.req.url || '').replace(/^\{\{\w+\}\}/, '') || f.col.name : ''; }
+  if (n.type === 'condition') return Flows.describeRules(n);
+  if (n.type === 'loop') return n.mode === 'list' ? `cada ${n.itemVar || 'item'} de ${n.list || '…'}` : n.mode === 'while' ? `enquanto ${Flows.describeRules(n)} (até ${n.max || 20}×)` : `${n.count || 0} vezes`;
+  if (n.type === 'set') return (n.assign || []).filter((a) => a.key).map((a) => `${a.key} = ${a.value}`).join(' · ') || 'nenhuma variável';
+  if (n.type === 'delay') return `${n.ms ?? 0} ms`;
+  return '';
+}
+const flowRO = () => !canEditWs(activeWorkspace());
+function flowTouch() { persist(); }
+
+function newFlowPrompt() {
+  if (flowRO()) return toast('Você tem acesso só de leitura neste workspace.', 2400);
+  promptModal({ title: 'Novo fluxo', sub: 'Encadeie requisições: login → criar pedido → consultar. Os valores de uma passam para a outra.', label: 'Nome', value: 'Novo fluxo', ok: 'Criar' }).then((o) => {
+    if (!o) return;
+    const f = Flows.newFlow(o.value.trim() || 'Novo fluxo');
+    flowsOf().push(f); persist();
+    side = 'flows'; renderSidebar();
+    openFlow(f.id);
+  });
+}
+function openFlow(id) {
+  const f = flowById(id);
+  if (!f) return;
+  if (!flowUi || flowUi.id !== id) flowUi = { id, sel: null, selEdge: null, view: { x: 40, y: 20, z: 1 }, panel: 'node', run: flowUi && flowUi.runs && flowUi.runs[id] ? flowUi.runs[id] : null, runs: (flowUi && flowUi.runs) || {} };
+  $('.main').classList.add('flow-open');
+  $('#flowView').classList.remove('hidden');
+  renderFlow();
+  renderSidebar();
+}
+function closeFlow() {
+  if (!flowUi) return;
+  if (flowUi.run && flowUi.run.running) flowUi.run.stop = true;
+  flowUi = { runs: flowUi.runs };
+  $('.main').classList.remove('flow-open');
+  $('#flowView').classList.add('hidden');
+  $('#flowView').innerHTML = '';
+  renderSidebar();
+}
+const flowOpen = () => !!(flowUi && flowUi.id && flowById(flowUi.id));
+
+function renderFlow() {
+  const view = $('#flowView');
+  const f = flowUi && flowById(flowUi.id);
+  if (!f) { if (flowUi && flowUi.id) { toast('Este fluxo foi excluído.', 2400); closeFlow(); } return; }
+  const ro = flowRO();
+  const run = flowUi.run;
+  view.innerHTML = '';
+  const issues = Flows.validate(f, { reqExists: (ref) => !!findRef(ref) });
+  const errs = issues.filter((i) => i.level === 'erro');
+  const name = h('input', { class: 'title-input fl-name', value: f.name, spellcheck: 'false', disabled: ro });
+  name.addEventListener('change', () => { f.name = name.value.trim() || 'Fluxo'; flowTouch(); renderSidebar(); });
+  const env = activeEnv();
+  const runBtn = run && run.running
+    ? h('button', { class: 'btn-ghost', onclick: () => { run.stop = true; toast('Parando depois do passo atual…', 1800); } }, 'Parar')
+    : h('button', { class: 'btn-primary', disabled: !!errs.length, title: errs.length ? errs[0].text : `Executar no ambiente ${env ? env.name : '(nenhum)'}`, onclick: () => runFlowNow(f) }, 'Executar');
+  const head = h('div', { class: 'fl-head' },
+    h('button', { class: 'btn-text sm', title: 'Voltar às requisições', onclick: closeFlow }, '← Requisições'),
+    h('span', { class: 'fl-kind' }, 'Fluxo'), name,
+    ro ? h('span', { class: 'ws-ro' }, 'só leitura') : null,
+    h('div', { class: 'grow' }),
+    errs.length ? h('button', { class: 'flag warn', onclick: () => { const e = errs[0]; if (e.nodeId) { flowUi.sel = e.nodeId; flowUi.panel = 'node'; renderFlow(); } } }, `${errs.length} pendência${errs.length > 1 ? 's' : ''}`) : null,
+    h('span', { class: 'muted small' }, 'Ambiente ', h('b', {}, env ? env.name : 'nenhum')),
+    runBtn,
+    h('button', { class: 'more', title: 'Opções', onclick: (e) => showMenu(e.currentTarget, flowMenu(f)) }, '⋯'));
+
+  // paleta
+  const palette = h('div', { class: 'fl-palette' }, h('div', { class: 'section-label' }, 'Blocos'),
+    ['request', 'condition', 'loop', 'set', 'delay'].map((t) => {
+      const b = h('button', { class: 'fl-pal', draggable: !ro, disabled: ro, title: FLOW_HELP[t], onclick: () => addFlowNode(f, t) },
+        h('span', { class: 'fl-ic fl-ic-' + t, html: FLOW_ICON[t] }), h('span', {}, Flows.TYPES[t].label));
+      b.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/mono-flow', t); e.dataTransfer.effectAllowed = 'copy'; });
+      return b;
+    }),
+    h('div', { class: 'section-label', style: 'margin-top:14px' }, 'Requisições'),
+    h('p', { class: 'hint', style: 'margin:0 0 6px' }, 'Arraste para o quadro.'),
+    flowReqPalette(f, ro));
+
+  // quadro
+  const canvas = h('div', { class: 'fl-canvas' + (ro ? ' ro' : '') });
+  const world = h('div', { class: 'fl-world' });
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('class', 'fl-edges');
+  world.append(svg);
+  canvas.append(world,
+    h('div', { class: 'fl-zoom' },
+      h('button', { class: 'icon-btn', title: 'Diminuir', onclick: () => zoomFlow(canvas, world, 1 / 1.2) }, '−'),
+      h('button', { class: 'btn-text sm', title: 'Ajustar à tela', onclick: () => fitFlow(f, canvas, world) }, `${Math.round(flowUi.view.z * 100)}%`),
+      h('button', { class: 'icon-btn', title: 'Aumentar', onclick: () => zoomFlow(canvas, world, 1.2) }, '+')));
+  if (f.nodes.length <= 1 && !ro) canvas.append(h('div', { class: 'fl-empty' }, h('b', {}, 'Monte o fluxo'), 'Arraste requisições e blocos da esquerda para o quadro. Arraste a bolinha de baixo de um bloco até o próximo.'));
+
+  const stateOf = (id) => (run && run.nodes[id]) || null;
+  const nodeEls = new Map();
+  for (const n of f.nodes) {
+    const st = stateOf(n.id);
+    const ports = Flows.TYPES[n.type]?.ports || [];
+    const el = h('div', { class: `fl-node t-${n.type}` + (flowUi.sel === n.id ? ' sel' : '') + (st ? ' r-' + st.state : '') + (issues.some((i) => i.nodeId === n.id && i.level === 'erro') ? ' bad' : ''), style: `left:${n.x}px;top:${n.y}px`, 'data-node': n.id },
+      n.type !== 'start' ? h('span', { class: 'fl-in', title: 'Entrada' }) : null,
+      h('div', { class: 'fl-n-head' }, h('span', { class: 'fl-ic fl-ic-' + n.type, html: FLOW_ICON[n.type] }),
+        n.type === 'request' && findRef(n.ref) ? h('span', { class: 'm ' + methodClass(findRef(n.ref).req.method) }, findRef(n.ref).req.method) : null,
+        h('span', { class: 'fl-n-title' }, flowNodeTitle(n)),
+        st && st.badge ? h('span', { class: 'fl-n-badge' }, st.badge) : null),
+      h('div', { class: 'fl-n-sum' }, flowNodeSummary(n)),
+      ports.map((p, i) => h('span', { class: `fl-out p-${p}`, style: `left:${portX(ports.length, i)}px`, 'data-port': p, title: ro ? '' : 'Arraste até o próximo bloco' }, Flows.PORT_LABEL[p] ? h('span', { class: 'fl-out-l' }, Flows.PORT_LABEL[p]) : null)));
+    world.append(el);
+    nodeEls.set(n.id, el);
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      const port = e.target.closest('.fl-out');
+      e.stopPropagation();
+      if (port && !ro) return startWire(e, f, n, port.dataset.port, canvas, world, svg);
+      flowUi.sel = n.id; flowUi.selEdge = null; flowUi.panel = 'node';
+      $$('.fl-node.sel', world).forEach((x) => x.classList.remove('sel')); el.classList.add('sel');
+      drawFlowPanel(f);
+      if (ro || n.type === 'start' && false) return;
+      const z = flowUi.view.z, sx = e.clientX, sy = e.clientY, ox = n.x, oy = n.y;
+      let moved = false;
+      const mv = (ev) => {
+        const dx = (ev.clientX - sx) / z, dy = (ev.clientY - sy) / z;
+        if (!moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+        moved = true;
+        n.x = Math.round((ox + dx) / 4) * 4; n.y = Math.round((oy + dy) / 4) * 4;
+        el.style.left = n.x + 'px'; el.style.top = n.y + 'px';
+        drawEdges(f, svg);
+      };
+      const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); if (moved) flowTouch(); };
+      window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+    });
+    el.addEventListener('dblclick', () => { if (n.type === 'request' && findRef(n.ref)) { const r = findRef(n.ref); closeFlow(); openTab(r.req, { colId: r.col.id, reqId: r.req.id }); } });
+  }
+  drawEdges(f, svg);
+  applyFlowView(world);
+
+  // arrastar o fundo move o quadro; roda do mouse rola; Ctrl + roda dá zoom
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 && e.button !== 1) return;
+    if (e.target.closest('.fl-zoom')) return;
+    const edge = e.target.closest('.fl-edge-hit');
+    if (edge) { flowUi.selEdge = edge.dataset.edge; flowUi.sel = null; drawEdges(f, svg); $$('.fl-node.sel', world).forEach((x) => x.classList.remove('sel')); drawFlowPanel(f); return; }
+    if (flowUi.sel || flowUi.selEdge) { flowUi.sel = null; flowUi.selEdge = null; $$('.fl-node.sel', world).forEach((x) => x.classList.remove('sel')); drawEdges(f, svg); drawFlowPanel(f); }
+    const sx = e.clientX, sy = e.clientY, ox = flowUi.view.x, oy = flowUi.view.y;
+    canvas.classList.add('panning');
+    const mv = (ev) => { flowUi.view.x = ox + ev.clientX - sx; flowUi.view.y = oy + ev.clientY - sy; applyFlowView(world); };
+    const up = () => { canvas.classList.remove('panning'); window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+  });
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.ctrlKey) { const r = canvas.getBoundingClientRect(); zoomFlow(canvas, world, e.deltaY < 0 ? 1.1 : 1 / 1.1, e.clientX - r.left, e.clientY - r.top); }
+    else { flowUi.view.x -= e.shiftKey ? e.deltaY : e.deltaX; flowUi.view.y -= e.shiftKey ? 0 : e.deltaY; applyFlowView(world); }
+  }, { passive: false });
+  canvas.addEventListener('dragover', (e) => { if (!ro && [...e.dataTransfer.types].some((t) => t.startsWith('text/mono-'))) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+  canvas.addEventListener('drop', (e) => {
+    if (ro) return;
+    const t = e.dataTransfer.getData('text/mono-flow'), r = e.dataTransfer.getData('text/mono-flow-req');
+    if (!t && !r) return;
+    e.preventDefault();
+    const rect = canvas.getBoundingClientRect(), z = flowUi.view.z;
+    const x = (e.clientX - rect.left - flowUi.view.x) / z - FN_W / 2, y = (e.clientY - rect.top - flowUi.view.y) / z - FN_H / 2;
+    if (r) { const [colId, reqId] = r.split('|'); addFlowNode(f, 'request', { x, y, ref: { colId, reqId } }); }
+    else addFlowNode(f, t, { x, y });
+  });
+
+  const panel = h('div', { class: 'fl-panel' });
+  view.append(head, h('div', { class: 'fl-body' }, palette, canvas, panel));
+  drawFlowPanel(f);
+}
+const portX = (count, i) => (count === 1 ? FN_W / 2 : count === 2 ? [Math.round(FN_W * 0.3), Math.round(FN_W * 0.7)][i] : 30 + i * 50);
+function applyFlowView(world) {
+  const v = flowUi.view;
+  world.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.z})`;
+  const lbl = world.parentElement && world.parentElement.querySelector('.fl-zoom .btn-text');
+  if (lbl) lbl.textContent = `${Math.round(v.z * 100)}%`;
+}
+function zoomFlow(canvas, world, k, cx, cy) {
+  const v = flowUi.view, r = canvas.getBoundingClientRect();
+  if (cx == null) { cx = r.width / 2; cy = r.height / 2; }
+  const z = Math.max(0.3, Math.min(2, v.z * k));
+  v.x = cx - ((cx - v.x) * z) / v.z; v.y = cy - ((cy - v.y) * z) / v.z; v.z = z;
+  applyFlowView(world);
+}
+function fitFlow(f, canvas, world) {
+  if (!f.nodes.length) return;
+  const r = canvas.getBoundingClientRect();
+  const minX = Math.min(...f.nodes.map((n) => n.x)), minY = Math.min(...f.nodes.map((n) => n.y));
+  const maxX = Math.max(...f.nodes.map((n) => n.x + FN_W)) + 50, maxY = Math.max(...f.nodes.map((n) => n.y + FN_H));
+  const z = Math.max(0.3, Math.min(1.2, Math.min((r.width - 60) / (maxX - minX), (r.height - 60) / (maxY - minY))));
+  flowUi.view = { z, x: (r.width - (maxX - minX) * z) / 2 - minX * z, y: (r.height - (maxY - minY) * z) / 2 - minY * z };
+  applyFlowView(world);
+}
+// De cima para baixo: sai pela bolinha de baixo e entra pelo topo do próximo bloco.
+function edgePath(a, b) {
+  if (b.y < a.y + 16) { // volta para cima (laço): contorna pela direita
+    const rx = Math.max(a.x, b.x) + FN_W * 0.75;
+    return `M${a.x},${a.y} C${a.x},${a.y + 50} ${rx},${a.y + 50} ${rx},${(a.y + b.y) / 2} S${b.x},${b.y - 50} ${b.x},${b.y}`;
+  }
+  const dy = Math.max(30, (b.y - a.y) / 2);
+  return `M${a.x},${a.y} C${a.x},${a.y + dy} ${b.x},${b.y - dy} ${b.x},${b.y}`;
+}
+function drawEdges(f, svg) {
+  svg.innerHTML = '';
+  const NS = 'http://www.w3.org/2000/svg';
+  const run = flowUi.run;
+  for (const e of f.edges) {
+    const a = Flows.nodeById(f, e.from), b = Flows.nodeById(f, e.to);
+    if (!a || !b) continue;
+    const ports = Flows.TYPES[a.type]?.ports || [];
+    const i = Math.max(0, ports.indexOf(e.port || 'out'));
+    const p1 = { x: a.x + portX(ports.length, i), y: a.y + FN_H + 6 }, p2 = { x: b.x + FN_W / 2, y: b.y - 7 };
+    const d = edgePath(p1, p2);
+    const used = run && run.edges && run.edges.has(e.id);
+    const path = document.createElementNS(NS, 'path');
+    path.setAttribute('d', d);
+    path.setAttribute('class', `fl-edge p-${e.port || 'out'}` + (flowUi.selEdge === e.id ? ' sel' : '') + (used ? ' used' : ''));
+    path.setAttribute('marker-end', 'url(#fl-arrow)');
+    const hit = document.createElementNS(NS, 'path');
+    hit.setAttribute('d', d); hit.setAttribute('class', 'fl-edge-hit'); hit.dataset.edge = e.id;
+    svg.append(path, hit);
+  }
+  const defs = document.createElementNS(NS, 'defs');
+  defs.innerHTML = '<marker id="fl-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="4.5" markerHeight="4.5" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="fl-arrow"/></marker>';
+  svg.prepend(defs);
+}
+function startWire(e, f, n, port, canvas, world, svg) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const ports = Flows.TYPES[n.type].ports;
+  const p1 = { x: n.x + portX(ports.length, ports.indexOf(port)), y: n.y + FN_H + 6 };
+  const tmp = document.createElementNS(NS, 'path');
+  tmp.setAttribute('class', 'fl-edge temp');
+  svg.append(tmp);
+  const rect = canvas.getBoundingClientRect();
+  const toWorld = (ev) => ({ x: (ev.clientX - rect.left - flowUi.view.x) / flowUi.view.z, y: (ev.clientY - rect.top - flowUi.view.y) / flowUi.view.z });
+  const target = (ev) => { const el = document.elementFromPoint(ev.clientX, ev.clientY); const node = el && el.closest('.fl-node'); return node && node.dataset.node !== n.id ? node : null; };
+  let over = null;
+  const mv = (ev) => {
+    tmp.setAttribute('d', edgePath(p1, toWorld(ev)));
+    const t = target(ev);
+    if (t !== over) { if (over) over.classList.remove('drop'); over = t; if (over) over.classList.add('drop'); }
+  };
+  const up = (ev) => {
+    window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up);
+    if (over) over.classList.remove('drop');
+    const t = target(ev);
+    if (t) {
+      const to = Flows.nodeById(f, t.dataset.node);
+      if (to && to.type !== 'start') { Flows.connect(f, n.id, port, to.id); flowTouch(); }
+    } else if (Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 4) {
+      // clique na bolinha sem arrastar: desfaz a ligação dessa saída
+      if (f.edges.some((x) => x.from === n.id && (x.port || 'out') === port)) { Flows.connect(f, n.id, port, null); flowTouch(); }
+    } else {
+      // soltou no vazio: oferece criar o próximo bloco ali
+      const at = toWorld(ev);
+      showMenu({ getBoundingClientRect: () => ({ left: ev.clientX, right: ev.clientX, top: ev.clientY, bottom: ev.clientY, width: 0, height: 0 }) },
+        ['request', 'condition', 'loop', 'set', 'delay'].map((t2) => ({ label: 'Novo bloco: ' + Flows.TYPES[t2].label, run: () => { const nn = addFlowNode(f, t2, { x: at.x - FN_W / 2, y: at.y, silent: true }); Flows.connect(f, n.id, port, nn.id); flowTouch(); renderFlow(); } })));
+    }
+    renderFlow();
+  };
+  window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+}
+function addFlowNode(f, type, { x, y, ref, silent } = {}) {
+  if (flowRO()) return null;
+  const n = Flows.newNode(type);
+  if (x == null) {
+    const sel = flowUi.sel && Flows.nodeById(f, flowUi.sel);
+    const last = sel || f.nodes[f.nodes.length - 1];
+    x = last ? last.x : 80; y = last ? last.y + FN_H + 56 : 40;
+    // não cobre outro bloco: anda para a direita até achar espaço
+    while (f.nodes.some((m) => Math.abs(m.x - x) < FN_W + 20 && Math.abs(m.y - y) < FN_H + 20)) x += FN_W + 40;
+    // liga automaticamente ao selecionado (ou ao último) se a saída principal estiver livre
+    if (last) {
+      const port = (Flows.TYPES[last.type].ports || [])[0];
+      if (port && !Flows.nextOf(f, last.id, port)) f.edges.push({ id: uid('e'), from: last.id, port, to: n.id });
+    }
+  }
+  n.x = Math.round(x / 4) * 4; n.y = Math.round(y / 4) * 4;
+  if (ref) n.ref = ref;
+  f.nodes.push(n);
+  flowUi.sel = n.id; flowUi.panel = 'node';
+  flowTouch();
+  if (!silent) renderFlow();
+  return n;
+}
+function flowReqPalette(f, ro) {
+  const box = h('div', { class: 'fl-reqs' });
+  for (const col of data.collections) {
+    if (!col.requests.length) continue;
+    box.append(h('div', { class: 'fl-reqs-col' }, col.name));
+    for (const r of col.requests) {
+      const path = folderPath(col, r.folderId).map((x) => x.name).join(' / ');
+      const b = h('div', { class: 'fl-req', draggable: !ro, title: (path ? path + ' / ' : '') + r.name + '\n' + (r.url || ''), onclick: () => { if (!ro) addFlowNode(f, 'request', { ref: { colId: col.id, reqId: r.id } }); } },
+        h('span', { class: 'm ' + methodClass(r.method) }, r.method), h('span', { class: 'name' }, r.name));
+      b.addEventListener('dragstart', (e) => { e.dataTransfer.setData('text/mono-flow-req', `${col.id}|${r.id}`); e.dataTransfer.effectAllowed = 'copy'; });
+      box.append(b);
+    }
+  }
+  if (!box.children.length) box.append(h('div', { class: 'muted small' }, 'Nenhuma requisição salva ainda.'));
+  return box;
+}
+function flowMenu(f) {
+  const ro = flowRO();
+  return [
+    { label: 'Ajustar à tela', run: () => { const c = $('.fl-canvas'), w = $('.fl-world'); if (c && w) fitFlow(f, c, w); } },
+    { label: 'Organizar blocos', run: () => { if (!ro) { autoLayout(f); flowTouch(); renderFlow(); } } },
+    ...(activeWorkspace().shared ? [{ label: 'Histórico de alterações…', run: () => openHistory(activeWorkspace(), { itemId: f.id, title: `Histórico de “${f.name}”` }) }] : []),
+    { label: 'Exportar JSON…', run: () => saveText(`fluxo-${slug(f.name)}.json`, JSON.stringify({ format: 'mono-flow', version: 1, flow: f }, null, 2), [{ name: 'JSON', extensions: ['json'] }]) },
+    '-',
+    { label: 'Duplicar', run: () => { if (ro) return; const c = clone(f); c.id = uid('flow'); c.name += ' (cópia)'; flowsOf().push(c); persist(); openFlow(c.id); } },
+    { label: 'Excluir', run: async () => { if (ro) return; if (await confirmModal({ title: 'Excluir fluxo?', sub: `"${f.name}" e seus ${f.nodes.length} blocos serão removidos.` })) { data.flows = flowsOf().filter((x) => x !== f); persist(); closeFlow(); } } },
+  ];
+}
+// Organiza em colunas pela distância a partir do Início.
+function autoLayout(f) {
+  const start = f.nodes.find((n) => n.type === 'start');
+  if (!start) return;
+  const level = new Map([[start.id, 0]]), q = [start.id];
+  while (q.length) { const id = q.shift(); for (const e of f.edges) if (e.from === id && !level.has(e.to)) { level.set(e.to, level.get(id) + 1); q.push(e.to); } }
+  let maxL = Math.max(...level.values());
+  for (const n of f.nodes) if (!level.has(n.id)) level.set(n.id, ++maxL);
+  const rows = new Map();
+  for (const n of f.nodes) { const l = level.get(n.id); const r = rows.get(l) || 0; rows.set(l, r + 1); n.x = 60 + r * (FN_W + 50); n.y = 40 + l * (FN_H + 56); }
+}
+
+// ---------- painel da direita: bloco selecionado ou execução ----------
+function drawFlowPanel(f) {
+  const panel = $('.fl-panel');
+  if (!panel) return;
+  panel.innerHTML = '';
+  const run = flowUi.run;
+  const tabs = h('nav', { class: 'subtabs' },
+    h('button', { class: flowUi.panel === 'node' ? 'active' : '', onclick: () => { flowUi.panel = 'node'; drawFlowPanel(f); } }, 'Bloco'),
+    h('button', { class: flowUi.panel === 'run' ? 'active' : '', onclick: () => { flowUi.panel = 'run'; drawFlowPanel(f); } }, run ? `Execução${run.running ? '…' : run.result && run.result.ok ? ' ✓' : ' ✕'}` : 'Execução'));
+  const body = h('div', { class: 'fl-panel-body' });
+  panel.append(tabs, body);
+  if (flowUi.panel === 'run') return drawFlowRun(f, body);
+  if (flowUi.selEdge) {
+    const e = f.edges.find((x) => x.id === flowUi.selEdge);
+    if (e) {
+      body.append(h('h3', {}, 'Ligação'), h('p', { class: 'hint' }, `${flowNodeTitle(Flows.nodeById(f, e.from) || {})}${Flows.PORT_LABEL[e.port] ? ' (' + Flows.PORT_LABEL[e.port] + ')' : ''} → ${flowNodeTitle(Flows.nodeById(f, e.to) || {})}`),
+        flowRO() ? null : h('button', { class: 'btn-ghost sm', onclick: () => { f.edges = f.edges.filter((x) => x !== e); flowUi.selEdge = null; flowTouch(); renderFlow(); } }, 'Remover ligação'),
+        h('p', { class: 'hint' }, 'Dica: Delete também remove.'));
+      return;
+    }
+  }
+  const n = flowUi.sel && Flows.nodeById(f, flowUi.sel);
+  if (!n) { drawFlowGuide(f, body); return; }
+  const ro = flowRO();
+  const issues = Flows.validate(f, { reqExists: (ref) => !!findRef(ref) }).filter((i) => i.nodeId === n.id);
+  const changed = (redrawPanel = false) => { flowTouch(); refreshFlowNode(f, n); if (redrawPanel) drawFlowPanel(f); };
+  body.append(h('div', { class: 'fl-p-head' }, h('span', { class: 'fl-ic fl-ic-' + n.type, html: FLOW_ICON[n.type] }), h('b', {}, Flows.TYPES[n.type].label), h('div', { class: 'grow' }),
+    n.type !== 'start' && !ro ? h('button', { class: 'btn-text sm danger', onclick: () => { Flows.removeNode(f, n.id); flowUi.sel = null; flowTouch(); renderFlow(); } }, 'Excluir') : null));
+  if (FLOW_HELP[n.type]) body.append(h('p', { class: 'hint', style: 'margin-top:0' }, FLOW_HELP[n.type]));
+  for (const i of issues) body.append(h('div', { class: 'fl-issue ' + (i.level === 'erro' ? 'bad' : '') }, i.text));
+  const inp = (obj, key, ph, { cls = '', num = false, onChange } = {}) => {
+    const el = h('input', { class: 'input sm ' + cls, value: obj[key] ?? '', placeholder: ph, spellcheck: 'false', disabled: ro });
+    el.addEventListener('input', () => { obj[key] = num && el.value !== '' && !/\{\{/.test(el.value) ? Number(el.value) : el.value; changed(); if (onChange) onChange(); });
+    return el;
+  };
+  const sel = (obj, key, opts, onChange) => {
+    const s = h('select', { disabled: ro }, opts.map(([v, l]) => h('option', { value: v }, l)));
+    s.value = obj[key] ?? opts[0][0];
+    s.addEventListener('change', () => { obj[key] = s.value; changed(); if (onChange) onChange(); });
+    queueMicrotask(() => customSelect(s, { variant: 'compact' }));
+    return s;
+  };
+  const varHint = () => {
+    const vars = flowKnownVars(f, n);
+    return vars.length ? h('div', { class: 'fl-vars' }, h('span', { class: 'muted small' }, 'Variáveis do fluxo:'), vars.map((v) => h('button', { class: 'chip sm', title: 'Copiar', onclick: () => { api.copy?.(`{{${v}}}`); toast(`{{${v}}} copiado`, 1200); } }, `{{${v}}}`))) : null;
+  };
+  const rulesEditor = (node) => {
+    const box = h('div', { class: 'fl-rules' });
+    const draw = () => {
+      box.innerHTML = '';
+      (node.rules ||= []).forEach((r, i) => {
+        const right = Flows.UNARY.has(r.op) ? h('span') : inp(r, 'right', 'valor');
+        box.append(h('div', { class: 'fl-rule' }, inp(r, 'left', '{{variável}}', { cls: 'mono' }), sel(r, 'op', Flows.OPS, draw), right,
+          ro ? null : h('button', { class: 'icon-btn sm', title: 'Remover', onclick: () => { node.rules.splice(i, 1); changed(); draw(); } }, '×')));
+      });
+      if (!ro) box.append(h('div', { class: 'row-actions' }, h('button', { class: 'btn-text sm', onclick: () => { node.rules.push({ left: '', op: '==', right: '' }); changed(); draw(); } }, '+ Regra'),
+        node.rules.length > 1 ? h('div', { class: 'seg sm' }, ['all', 'any'].map((m) => h('button', { class: 'seg-btn' + ((node.match || 'all') === m ? ' active' : ''), onclick: () => { node.match = m; changed(); draw(); } }, m === 'all' ? 'Todas' : 'Qualquer uma'))) : null));
+    };
+    draw();
+    return box;
+  };
+  const assignEditor = (node, title) => {
+    const box = h('div', { class: 'fl-assign' });
+    const draw = () => {
+      box.innerHTML = '';
+      (node.assign ||= []).forEach((a, i) => box.append(h('div', { class: 'fl-rule two' }, inp(a, 'key', 'nome', { cls: 'mono' }), inp(a, 'value', 'valor ou {{outra}}'),
+        ro ? null : h('button', { class: 'icon-btn sm', onclick: () => { node.assign.splice(i, 1); changed(); draw(); } }, '×'))));
+      if (!ro) box.append(h('button', { class: 'btn-text sm', onclick: () => { node.assign.push({ key: '', value: '' }); changed(); draw(); } }, '+ Variável'));
+    };
+    draw();
+    return h('div', { class: 'field' }, h('label', {}, title), box);
+  };
+
+  if (n.type === 'start') {
+    body.append(assignEditor(n, 'Variáveis iniciais'), h('p', { class: 'hint' }, 'Valores de partida do fluxo (ex.: cnpj, quantidade). As variáveis do ambiente também valem.'));
+  } else if (n.type === 'request') {
+    const opts = [['', 'Escolha…']];
+    for (const col of data.collections) for (const r of col.requests) opts.push([`${col.id}|${r.id}`, `${col.name} › ${[...folderPath(col, r.folderId).map((x) => x.name), r.name].join(' › ')}  ·  ${r.method}`]);
+    const s = h('select', { disabled: ro }, opts.map(([v, l]) => h('option', { value: v }, l)));
+    s.value = n.ref ? `${n.ref.colId}|${n.ref.reqId}` : '';
+    s.addEventListener('change', () => { const [colId, reqId] = s.value.split('|'); n.ref = reqId ? { colId, reqId } : null; changed(true); });
+    queueMicrotask(() => customSelect(s));
+    const found = findRef(n.ref);
+    body.append(h('div', { class: 'field' }, h('label', {}, 'Requisição'), s),
+      found ? h('div', { class: 'row-actions', style: 'margin:-4px 0 10px' }, h('code', { class: 'fl-url' }, found.req.url || ''), h('div', { class: 'grow' }),
+        h('button', { class: 'btn-text sm', onclick: () => { closeFlow(); openTab(found.req, { colId: found.col.id, reqId: found.req.id }); } }, 'Abrir')) : null,
+      h('p', { class: 'hint' }, 'Use as variáveis do fluxo na URL, nos headers, no corpo ou na autorização da requisição: ', h('code', {}, '{{token}}'), '. Os scripts e testes da requisição também rodam.'));
+    // extração
+    const exBox = h('div', { class: 'fl-extract' });
+    const lastStep = flowUi.run && [...flowUi.run.steps].reverse().find((x) => x.nodeId === n.id && x.res);
+    const drawEx = () => {
+      exBox.innerHTML = '';
+      (n.extract ||= []).forEach((x, i) => {
+        const val = lastStep && lastStep.extracted && x.var && Object.prototype.hasOwnProperty.call(lastStep.extracted, x.var.trim()) ? lastStep.extracted[x.var.trim()] : undefined;
+        exBox.append(h('div', { class: 'fl-rule ex' },
+          inp(x, 'var', 'variável', { cls: 'mono' }),
+          sel(x, 'from', [['json', 'JSON'], ['xml', 'XML'], ['header', 'Header'], ['status', 'Status'], ['regex', 'Regex'], ['text', 'Corpo todo'], ['time', 'Tempo']], drawEx),
+          ['status', 'text', 'time'].includes(x.from) ? h('span') : inp(x, 'path', x.from === 'xml' ? 'cStat ou protNFe/nProt' : x.from === 'header' ? 'Location' : x.from === 'regex' ? '"id":(\\d+)' : 'data.token', { cls: 'mono' }),
+          ro ? null : h('button', { class: 'icon-btn sm', onclick: () => { n.extract.splice(i, 1); changed(); drawEx(); } }, '×')),
+          val !== undefined ? h('div', { class: 'fl-got' + (val === null ? ' miss' : '') }, val === null ? 'não encontrado na última execução' : '= ' + Flows.asText(val).slice(0, 160)) : null);
+      });
+      if (!ro) exBox.append(h('div', { class: 'row-actions' },
+        h('button', { class: 'btn-text sm', onclick: () => { n.extract.push({ var: '', from: 'json', path: '' }); changed(); drawEx(); } }, '+ Guardar valor'),
+        lastStep && lastStep.res && lastStep.res.body ? h('button', { class: 'btn-text sm', onclick: () => pickFromResponse(lastStep.res, (x) => { n.extract.push(x); changed(true); }) }, 'Escolher da última resposta…') : null));
+    };
+    drawEx();
+    body.append(h('div', { class: 'field' }, h('label', {}, 'Guardar da resposta'), exBox),
+      h('label', { class: 'check-row' }, h('input', { type: 'checkbox', checked: n.failOnHttp !== false, disabled: ro, onchange: (e) => { n.failOnHttp = e.target.checked; changed(); } }), h('span', {}, h('b', {}, 'Status 4xx/5xx conta como falha'))),
+      h('p', { class: 'hint' }, 'Falha = erro de rede, teste reprovado ou (se marcado) status de erro. Com a saída “falhou” ligada, o fluxo segue por ela; sem ela, o fluxo para.'));
+  } else if (n.type === 'condition') {
+    body.append(h('div', { class: 'field' }, h('label', {}, 'Nome (opcional)'), inp(n, 'title', 'Ex.: Autorizada?')),
+      h('div', { class: 'field' }, h('label', {}, 'Segue por “sim” quando'), rulesEditor(n)),
+      h('p', { class: 'hint' }, 'Compare variáveis do fluxo, como ', h('code', {}, '{{res.status}}'), ' (status da última resposta) ou ', h('code', {}, '{{pedido.itens.length}}'), '.'));
+  } else if (n.type === 'loop') {
+    const modes = h('div', { class: 'seg sm' }, [['count', 'N vezes'], ['list', 'Cada item'], ['while', 'Enquanto']].map(([m, l]) => h('button', { class: 'seg-btn' + ((n.mode || 'count') === m ? ' active' : ''), disabled: ro, onclick: () => { n.mode = m; changed(true); } }, l)));
+    body.append(h('div', { class: 'field' }, h('label', {}, 'Repetir'), modes));
+    if (n.mode === 'list') body.append(h('div', { class: 'field' }, h('label', {}, 'Lista'), inp(n, 'list', '{{pedidos}} ou A, B, C', { cls: 'mono' })),
+      h('div', { class: 'field-row' }, h('div', { class: 'field' }, h('label', {}, 'Item em'), inp(n, 'itemVar', 'item', { cls: 'mono' })), h('div', { class: 'field' }, h('label', {}, 'Posição em'), inp(n, 'indexVar', 'i', { cls: 'mono' }))),
+      h('p', { class: 'hint' }, 'Uma lista JSON guardada de uma resposta, ou valores separados por vírgula/linha. Dentro do laço: ', h('code', {}, `{{${n.itemVar || 'item'}}}`), ', ', h('code', {}, `{{${n.itemVar || 'item'}.id}}`), '.'));
+    else if (n.mode === 'while') body.append(h('div', { class: 'field' }, h('label', {}, 'Enquanto'), rulesEditor(n)),
+      h('div', { class: 'field-row' }, h('div', { class: 'field' }, h('label', {}, 'No máximo'), inp(n, 'max', '20', { num: true })), h('div', { class: 'field' }, h('label', {}, 'Esperar entre (ms)'), inp(n, 'wait', '0', { num: true }))),
+      h('p', { class: 'hint' }, 'Bom para consultar até ficar pronto: enquanto ', h('code', {}, '{{cStat}}'), ' for diferente de 100, consultar o recibo a cada 2000 ms.'));
+    else body.append(h('div', { class: 'field-row' }, h('div', { class: 'field' }, h('label', {}, 'Vezes'), inp(n, 'count', '3', { num: true })), h('div', { class: 'field' }, h('label', {}, 'Posição em'), inp(n, 'indexVar', 'i', { cls: 'mono' }))));
+    body.append(h('p', { class: 'hint' }, 'Ligue em “cada” o que repete; quando a sequência termina, volta para o laço. Depois da última volta, segue por “fim”.'));
+  } else if (n.type === 'set') {
+    body.append(h('div', { class: 'field' }, h('label', {}, 'Nome (opcional)'), inp(n, 'title', 'Ex.: Montar filtro')), assignEditor(n, 'Variáveis'),
+      h('p', { class: 'hint' }, 'Monte valores com outras variáveis: ', h('code', {}, 'Bearer {{token}}'), '.'));
+  } else if (n.type === 'delay') {
+    body.append(h('div', { class: 'field' }, h('label', {}, 'Esperar (ms)'), inp(n, 'ms', '1000', { num: true })));
+  }
+  const vh = varHint();
+  if (vh) body.append(vh);
+}
+function refreshFlowNode(f, n) {
+  const el = $(`.fl-node[data-node="${n.id}"]`);
+  if (!el) return;
+  const t = el.querySelector('.fl-n-title'), s = el.querySelector('.fl-n-sum');
+  if (t) t.textContent = flowNodeTitle(n);
+  if (s) s.textContent = flowNodeSummary(n);
+}
+// Variáveis conhecidas antes de um bloco (das iniciais, extrações, definições e laços), mais as da última execução.
+function flowKnownVars(f, upto) {
+  const out = new Set(['res.status', 'res.time']);
+  for (const n of f.nodes) {
+    for (const a of n.assign || []) if (a.key) out.add(a.key.trim());
+    for (const x of n.extract || []) if (x.var) out.add(x.var.trim());
+    if (n.type === 'loop') { if (n.mode === 'list') out.add(n.itemVar || 'item'); out.add(n.indexVar || 'i'); }
+  }
+  if (flowUi.run && flowUi.run.result) for (const k of Object.keys(flowUi.run.result.vars || {})) out.add(k);
+  return [...out].filter(Boolean).slice(0, 40);
+}
+function pickFromResponse(res, onPick) {
+  let json = null;
+  try { json = JSON.parse(res.body); } catch { /* XML ou texto */ }
+  openModal((body, close) => {
+    const isXml = !json && /^\s*</.test(res.body || '');
+    let rows;
+    if (json != null) rows = Flows.leafPaths(json).map((x) => ({ from: 'json', path: x.path, value: x.value, kind: x.kind }));
+    else if (isXml) {
+      const seen = new Map();
+      const re = /<(?:[\w.-]+:)?([\w.-]+)(?:\s[^>]*)?>([^<]+)<\/(?:[\w.-]+:)?\1>/g;
+      let m;
+      while ((m = re.exec(res.body)) && seen.size < 300) { if (!seen.has(m[1])) seen.set(m[1], m[2].trim()); }
+      rows = [...seen].map(([k, v]) => ({ from: 'xml', path: k, value: v, kind: 'texto' }));
+    } else rows = [];
+    rows.push(...(res.headers || []).slice(0, 30).map((x) => ({ from: 'header', path: x.key, value: x.value, kind: 'header' })));
+    const q = h('input', { class: 'input', placeholder: 'Filtrar campos…', spellcheck: 'false' });
+    const list = h('div', { class: 'fl-pick' });
+    const draw = () => {
+      list.innerHTML = '';
+      const t = q.value.trim().toLowerCase();
+      for (const r of rows.filter((x) => !t || x.path.toLowerCase().includes(t) || Flows.asText(x.value).toLowerCase().includes(t)).slice(0, 200)) {
+        list.append(h('button', { class: 'fl-pick-row', onclick: () => { close(); onPick({ var: r.from === 'header' ? r.path.toLowerCase().replace(/[^\w]+/g, '_') : Flows.varNameFor(r.path), from: r.from, path: r.path }); } },
+          h('span', { class: 'tag' }, r.from === 'json' ? r.kind : r.from), h('code', {}, r.path), h('span', { class: 'muted' }, Flows.asText(r.value).slice(0, 80))));
+      }
+      if (!list.children.length) list.append(h('div', { class: 'muted', style: 'padding:10px' }, 'Nada encontrado.'));
+    };
+    q.addEventListener('input', draw);
+    body.append(h('h2', {}, 'Escolher valor da resposta'), h('p', { class: 'sub' }, 'Clique no campo: ele vira uma variável do fluxo para os próximos blocos.'), q, list,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: close }, 'Cancelar')));
+    draw();
+    setTimeout(() => q.focus(), 0);
+  });
+  $('#modalBody').classList.add('wide');
+}
+function drawFlowGuide(f, body) {
+  const last = flowLast()[f.id];
+  body.append(h('h3', {}, 'Como montar'),
+    h('ol', { class: 'fl-guide' },
+      h('li', {}, 'Arraste as requisições da esquerda para o quadro, na ordem.'),
+      h('li', {}, 'Arraste a bolinha de baixo de um bloco até o próximo (clique na bolinha para desligar).'),
+      h('li', {}, 'Na requisição, em “Guardar da resposta”, crie variáveis — ex.: ', h('code', {}, 'token'), ' de ', h('code', {}, 'access_token'), '.'),
+      h('li', {}, 'Use ', h('code', {}, '{{token}}'), ' nas próximas requisições.'),
+      h('li', {}, 'Use Condição e Repetir para decidir e repetir sem escrever script.')),
+    h('p', { class: 'hint' }, 'Roda no ambiente ativo, com os scripts, a autorização, os cookies e o certificado de cada requisição. Arraste o fundo para mover; Ctrl + roda para zoom.'),
+    last ? h('div', { class: 'fl-last' + (last.ok ? '' : ' bad') }, `Última execução ${savedWhen(last.at)}: ${last.ok ? 'concluída' : 'falhou'} · ${plural(last.requests || 0, 'requisição', 'requisições')} · ${fmtTime(last.ms || 0)}`) : null);
+}
+
+// ---------- execução ----------
+async function runFlowNow(f) {
+  if (flowUi.run && flowUi.run.running) return;
+  const issues = Flows.validate(f, { reqExists: (ref) => !!findRef(ref) }).filter((i) => i.level === 'erro');
+  if (issues.length) { flowUi.sel = issues[0].nodeId; flowUi.panel = 'node'; renderFlow(); return toast(issues[0].text, 2600); }
+  const env = activeEnv();
+  const mutating = f.nodes.filter((n) => n.type === 'request' && findRef(n.ref) && isMutating(findRef(n.ref).req.method));
+  if (env && env.prod && mutating.length && !(await confirmModal({ title: 'Executar em produção?', sub: `O ambiente "${env.name}" é de produção e o fluxo tem ${mutating.length} requisição(ões) que alteram dados.`, ok: 'Executar em produção' }))) return;
+  const run = { running: true, stop: false, startedAt: Date.now(), nodes: {}, edges: new Set(), steps: [], open: new Set(), envName: env ? env.name : '' };
+  flowUi.run = run; flowUi.runs[f.id] = run; flowUi.panel = 'run';
+  renderFlow();
+  const w = { env: env ? clone(env.vars) : [], glob: clone(globalsOf().vars), cols: {} };
+  const mark = (id, patch) => { run.nodes[id] = { ...(run.nodes[id] || {}), ...patch }; };
+  const hooks = {
+    stopped: () => run.stop,
+    sleep: (ms) => new Promise((r) => { const t0 = Date.now(); const tick = () => (run.stop || Date.now() - t0 >= ms ? r() : setTimeout(tick, Math.min(200, ms))); tick(); }),
+    async request(node, vars) {
+      const found = findRef(node.ref);
+      if (!found) return { ok: false, failed: true, error: 'Requisição não encontrada.' };
+      const col = found.col;
+      w.col = (w.cols[col.id] ||= clone(col.variables || []));
+      const row = {};
+      for (const [k, v] of Object.entries(vars)) row[k] = Flows.asText(v);
+      const { rec, res } = await runnerExec(col, found.req, { i: 0, n: 1, row, w });
+      if (rec.skipped) return { ok: true, failed: false, status: null, headers: [], body: '', time: 0, name: found.req.name, method: rec.method, url: '', logs: rec.logs, tests: rec.tests, skipped: true };
+      if (res && res.ok) recordResponse(found.req.id, found.req, res, env, `fluxo ${f.name}`.slice(0, 60));
+      const testsFailed = (rec.tests || []).filter((t) => !t.pass && !t.skipped).length;
+      const httpFail = node.failOnHttp !== false && res && res.ok && res.status >= 400;
+      return { ok: !!(res && res.ok), failed: !!rec.error || testsFailed > 0 || httpFail, error: rec.error || (httpFail ? `Status ${res.status}${res.statusText ? ' ' + res.statusText : ''}.` : null), testsFailed, tests: rec.tests, logs: rec.logs,
+        status: res && res.status, statusText: res && res.statusText, headers: (res && res.headers) || [], body: res && res.body, time: res && res.time, size: res && res.size, contentType: res && res.contentType, method: rec.method, url: rec.url, name: found.req.name };
+    },
+    onStep(step, steps) {
+      run.steps = steps;
+      if (step.nodeId) {
+        const first = !step.counted;
+        step.counted = true;
+        const prev = run.nodes[step.nodeId] || {};
+        const count = (prev.count || 0) + (first ? 1 : 0);
+        if (first) for (const e of f.edges) if (e.to === step.nodeId && run.nodes[e.from]) run.edges.add(e.id);
+        mark(step.nodeId, { state: step.state, count,
+          badge: step.type === 'loop' ? `${step.iterations || 0}${step.total != null ? '/' + step.total : ''}` : step.type === 'condition' ? (step.result ? 'sim' : 'não') : count > 1 ? `${count}×` : step.ms != null && step.type === 'request' ? fmtTime(step.ms) : '' });
+      }
+      paintFlowRun(f);
+    },
+  };
+  const start = f.nodes.find((n) => n.type === 'start');
+  if (start) mark(start.id, { state: 'ok' });
+  const result = await Flows.run(f, hooks, {});
+  run.running = false; run.result = result; run.steps = result.steps; run.endedAt = Date.now();
+  if (result.nodeId) mark(result.nodeId, { state: 'fail' });
+  // o que os scripts gravaram (pm.environment) fica no ambiente, como no runner
+  if (env) env.vars = w.env;
+  for (const [cid, vars] of Object.entries(w.cols)) { const c = data.collections.find((x) => x.id === cid); if (c) c.variables = vars; }
+  globalsOf().vars = w.glob;
+  const reqSteps = result.steps.filter((s) => s.type === 'request');
+  flowLast()[f.id] = { at: run.startedAt, ok: result.ok, ms: run.endedAt - run.startedAt, requests: reqSteps.length, failed: reqSteps.filter((s) => s.state === 'fail').length, error: result.error || '' };
+  persist(); window.MonoVars.refresh();
+  if (flowUi && flowUi.id === f.id) renderFlow();
+  renderSidebar();
+  if (!result.ok && !result.stopped) toast('Fluxo parou: ' + result.error, 3200);
+}
+let flowPaintRaf = 0;
+function paintFlowRun(f) {
+  if (flowPaintRaf) return;
+  flowPaintRaf = requestAnimationFrame(() => {
+    flowPaintRaf = 0;
+    if (!flowUi || flowUi.id !== f.id || !flowUi.run) return;
+    const run = flowUi.run;
+    for (const n of f.nodes) {
+      const el = $(`.fl-node[data-node="${n.id}"]`);
+      if (!el) continue;
+      const st = run.nodes[n.id];
+      el.classList.remove('r-running', 'r-ok', 'r-fail');
+      if (st) el.classList.add('r-' + st.state);
+      let b = el.querySelector('.fl-n-badge');
+      if (st && st.badge) { if (!b) { b = h('span', { class: 'fl-n-badge' }); el.querySelector('.fl-n-head').append(b); } b.textContent = st.badge; }
+      else if (b) b.remove();
+    }
+    const svg = $('.fl-edges'); if (svg) drawEdges(f, svg);
+    if (flowUi.panel === 'run') { const body = $('.fl-panel-body'); if (body) { const top = body.scrollTop; body.innerHTML = ''; drawFlowRun(f, body); body.scrollTop = run.running ? body.scrollHeight : top; } }
+  });
+}
+function drawFlowRun(f, body) {
+  const run = flowUi.run;
+  if (!run) { body.append(h('div', { class: 'empty', style: 'padding:24px 4px' }, h('strong', {}, 'Ainda não executado'), `Clique em Executar. Roda no ambiente ${activeEnv() ? activeEnv().name : '(nenhum)'}.`)); return; }
+  const steps = run.steps || [];
+  const reqs = steps.filter((s) => s.type === 'request');
+  const failed = reqs.filter((s) => s.state === 'fail').length;
+  const ms = (run.endedAt || Date.now()) - run.startedAt;
+  const r = run.result;
+  body.append(h('div', { class: 'fl-run-sum ' + (run.running ? 'running' : r && r.ok ? 'ok' : 'bad') },
+    h('b', {}, run.running ? 'Executando…' : r.ok ? 'Concluído' : r.stopped ? 'Interrompido' : 'Falhou'),
+    h('span', {}, `${plural(reqs.length, 'requisição', 'requisições')} · ${failed} falha${failed === 1 ? '' : 's'} · ${fmtTime(ms)}${run.envName ? ' · ' + run.envName : ''}`),
+    r && !r.ok && r.error && !r.stopped ? h('div', { class: 'fl-run-err' }, r.error) : null));
+  const list = h('div', { class: 'fl-steps' });
+  steps.forEach((s, idx) => {
+    const n = Flows.nodeById(f, s.nodeId) || { type: s.type };
+    const open = run.open.has(idx);
+    const res = s.res;
+    const ex = s.extracted && Object.keys(s.extracted).length ? s.extracted : null;
+    const head = h('button', { class: 'fl-step-head', onclick: () => { if (open) run.open.delete(idx); else run.open.add(idx); flowUi.sel = s.nodeId; $$('.fl-node.sel').forEach((x) => x.classList.remove('sel')); $(`.fl-node[data-node="${s.nodeId}"]`)?.classList.add('sel'); body.innerHTML = ''; drawFlowRun(f, body); } },
+      h('span', { class: 'fl-dot s-' + s.state }),
+      h('span', { class: 'fl-ic fl-ic-' + s.type, html: FLOW_ICON[s.type] || '' }),
+      h('span', { class: 'fl-step-name' }, s.type === 'request' && res && res.name ? res.name : flowNodeTitle(n)),
+      s.type === 'request' && res ? (res.status != null ? h('span', { class: `status s${String(res.status)[0]}` }, String(res.status)) : h('span', { class: 'status err' }, 'ERRO')) : null,
+      s.type === 'condition' ? h('span', { class: 'tag' }, s.result ? 'sim' : 'não') : null,
+      s.type === 'loop' ? h('span', { class: 'muted small' }, `${s.iterations || 0}${s.total != null ? '/' + s.total : ''} volta(s)`) : null,
+      s.ms != null && s.type !== 'loop' ? h('span', { class: 'muted small' }, fmtTime(s.ms)) : null);
+    const detail = h('div', { class: 'fl-step-detail' });
+    if (ex) detail.append(h('div', { class: 'fl-ex' }, Object.entries(ex).map(([k, v]) => h('div', {}, h('code', {}, `{{${k}}}`), ' = ', h('span', { class: v === null ? 'miss' : '' }, v === null ? 'não encontrado' : Flows.asText(v).slice(0, 200))))));
+    if (s.note) detail.append(h('div', { class: 'muted small' }, s.note));
+    if (open) {
+      if (s.type === 'condition') detail.append(h('div', { class: 'muted small' }, s.text));
+      if (res) {
+        detail.append(h('div', { class: 'mono small muted', style: 'word-break:break-all' }, `${res.method || ''} ${res.url || ''}`));
+        if (res.error) detail.append(h('pre', { class: 'res-error' }, res.error));
+        if ((res.tests || []).length) detail.append(renderTestList(res.tests, null));
+        if ((res.logs || []).length) detail.append(renderConsole(res.logs));
+        if (res.body != null && res.body !== '') {
+          const big = res.body.length > 60000;
+          const text = big ? res.body.slice(0, 60000) : res.body;
+          const lang = window.MonoFormat.detect(res.contentType, text);
+          const pretty = (!big && window.MonoFormat.pretty(lang, text)) || text;
+          detail.append(h('div', { class: 'rn-body' }, codeView(pretty, lang === 'json' ? 'json' : lang === 'html' || lang === 'xml' ? 'markup' : 'plain')),
+            flowRO() ? null : h('button', { class: 'btn-text sm', onclick: () => { const nd = Flows.nodeById(f, s.nodeId); if (nd) pickFromResponse(res, (x) => { (nd.extract ||= []).push(x); flowTouch(); flowUi.sel = nd.id; flowUi.panel = 'node'; renderFlow(); }); } }, 'Guardar um valor desta resposta…'));
+        }
+      }
+    }
+    list.append(h('div', { class: 'fl-step' + (s.state === 'fail' ? ' fail' : '') }, head, detail.children.length ? detail : null));
+  });
+  body.append(list);
+  if (r && r.vars && Object.keys(r.vars).length) {
+    body.append(h('div', { class: 'section-label', style: 'margin-top:12px' }, 'Variáveis no fim'),
+      h('table', { class: 'data-table fl-vars-t' }, Object.entries(r.vars).filter(([k]) => !k.startsWith('res.')).map(([k, v]) => h('tr', {}, h('td', { class: 'mono-cell' }, k), h('td', { class: 'mono-cell' + (v == null ? ' muted' : '') }, v == null ? 'vazio' : Flows.asText(v).slice(0, 300))))));
+  }
+}
+function renderFlowsSide(list, q) {
+  const flows = flowsOf().filter((f) => !q || f.name.toLowerCase().includes(q));
+  if (!flowsOf().length) {
+    list.append(h('div', { class: 'empty' }, h('strong', {}, 'Nenhum fluxo'), 'Encadeie requisições num quadro — login → criar pedido → consultar — passando valores de uma para a outra.'));
+    return;
+  }
+  for (const f of flows) {
+    const last = flowLast()[f.id];
+    const nReq = f.nodes.filter((n) => n.type === 'request').length;
+    const more = h('button', { class: 'more', title: 'Opções', onclick: (e) => { e.stopPropagation(); showMenu(e.currentTarget, [
+      { label: 'Abrir', run: () => openFlow(f.id) },
+      { label: 'Executar', run: () => { openFlow(f.id); runFlowNow(f); } },
+      { label: 'Renomear', run: async () => { if (flowRO()) return; const o = await promptModal({ title: 'Renomear fluxo', label: 'Nome', value: f.name }); if (o) { f.name = o.value; persist(); renderSidebar(); if (flowOpen()) renderFlow(); } } },
+      ...flowMenu(f).slice(-3),
+    ]); } }, '⋯');
+    list.append(h('div', { class: 'tree-row flow-row' + (flowUi && flowUi.id === f.id ? ' active' : ''), style: '--depth:0', 'data-flow': f.id, onclick: () => openFlow(f.id) },
+      h('span', { class: 'fl-ic fl-ic-loop', html: '<svg viewBox="0 0 24 24"><circle cx="6" cy="6" r="2.5"/><circle cx="18" cy="18" r="2.5"/><path d="M8.5 6H14a4 4 0 0 1 4 4v5.5"/></svg>' }),
+      h('span', { class: 'name' }, f.name),
+      last ? h('span', { class: 'fl-dot s-' + (last.ok ? 'ok' : 'fail'), title: `Última execução ${savedWhen(last.at)}: ${last.ok ? 'ok' : last.error}` }) : null,
+      h('span', { class: 'n' }, nReq), more));
+  }
+}
+
 // ---------- Busca global (Ctrl + K) ----------
 // Acha requisições, coleções, pastas, ambientes, variáveis e workspaces — inclusive de outros workspaces — e ações do app.
 function searchIndex() {
@@ -2790,10 +3514,11 @@ function searchIndex() {
       for (const v of e.vars || []) if (v.key) out.push({ kind: 'var', label: `{{${v.key}}}`, sub: `${e.name}${v.secret ? ' · segredo' : ' · ' + String(v.value ?? '').slice(0, 60)}`, ws: wsTag, hay: norm(v.key + ' ' + e.name), run: go(() => { data.activeEnvId = e.id; renderEnvSelect(); openEnvEditor(); }) });
     }
     for (const v of (d.globals || {}).vars || []) if (v.key) out.push({ kind: 'var', label: `{{${v.key}}}`, sub: `global${v.secret ? ' · segredo' : ' · ' + String(v.value ?? '').slice(0, 60)}`, ws: wsTag, hay: norm(v.key + ' global'), run: go(() => openEnvEditor()) });
+    for (const fl of d.flows || []) out.push({ kind: 'flow', label: fl.name, sub: `fluxo · ${plural((fl.nodes || []).filter((n) => n.type === 'request').length, 'requisição', 'requisições')}`, ws: wsTag, hay: norm(fl.name + ' fluxo'), run: go(() => { side = 'flows'; openFlow(fl.id); }) });
     if (!here) out.push({ kind: 'ws', label: w.name, sub: 'workspace', hay: norm(w.name + ' workspace'), run: () => switchWorkspace(w.id) });
   }
   const acts = [
-    ['Nova requisição', 'Ctrl + T', () => openTab(newRequest())], ['Importar API', '', () => $('#importSpecBtn').click()],
+    ['Nova requisição', 'Ctrl + T', () => openTab(newRequest())], ['Novo fluxo', '', () => newFlowPrompt()], ['Importar API', '', () => $('#importSpecBtn').click()],
     ['Monitores', '', () => openMonitors()], ['Histórico de alterações', '', () => openHistory()], ['Pessoas e convites', '', () => openShare(activeWorkspace())],
     ['Ambientes', '', () => openEnvEditor()], ['Cookies', '', () => openCookies()], ['Abrir coleção de uma pasta (Git)', '', () => openGitCollection()], ['Configurações', '', () => openSettings()], ['Sua conta', '', () => openAccount()],
   ];
@@ -2814,7 +3539,7 @@ function searchRank(items, norm, q) {
       score += Math.max(0, 10 - i / 10);
     }
     if (!ok) continue;
-    score += { req: 6, act: 5, col: 4, env: 3, fold: 2, var: 1, ws: 2 }[it.kind] || 0;
+    score += { req: 6, flow: 5, act: 5, col: 4, env: 3, fold: 2, var: 1, ws: 2 }[it.kind] || 0;
     if (it.ws) score -= 4;
     scored.push([score, it]);
   }
@@ -2827,7 +3552,7 @@ function openSearch() {
     const input = h('input', { class: 'pal-input', placeholder: 'Buscar requisições, coleções, ambientes, variáveis, ações…', spellcheck: 'false' });
     const list = h('div', { class: 'pal-list', role: 'listbox' });
     let rows = [], sel = 0;
-    const KIND = { req: '', col: 'coleção', fold: 'pasta', env: 'ambiente', var: 'variável', ws: 'workspace', act: 'ação' };
+    const KIND = { req: '', flow: 'fluxo', col: 'coleção', fold: 'pasta', env: 'ambiente', var: 'variável', ws: 'workspace', act: 'ação' };
     const draw = () => {
       rows = searchRank(out, norm, input.value);
       sel = Math.min(sel, Math.max(0, rows.length - 1));
@@ -3080,7 +3805,10 @@ async function runCompare(otherEnv) {
   const [a, b] = await Promise.all([api.send(req, mergedVars(envA, col)), api.send(req, mergedVars(envB, col))]);
   state.scripts = null;
   await afterResponse(tab, req, a, envA);
-  state.loading = false; state.response = a;
+  state.loading = false; state.response = a; state.liveResponse = null;
+  const key = respKey(tab);
+  const ea = await recordResponse(key, req, a, envA); if (ea) a.savedId = ea.id;
+  await recordResponse(key, req, b, envB);
   state.compare = { a: { env: envA.name, res: a }, b: { env: envB.name, res: b }, ...diffResponses(a, b) };
   resTab = 'compare';
   addHistory(req, a, envA); addHistory(req, b, envB);
@@ -3161,6 +3889,137 @@ function renderChanges(body, ch) {
         h('td', {}, h('span', { class: 'kbadge k-' + (c.kind === 'added' ? 'added' : c.kind === 'removed' ? 'removed' : 'type') }, CHANGE_LABEL[c.kind])),
         h('td', { class: 'mono-cell' }, c.path), h('td', { class: 'mono-cell' }, c.from ?? '—'), h('td', { class: 'mono-cell' }, c.to ?? '—')))));
   }
+  body.append(wrap);
+}
+
+// ---------- Respostas guardadas (comparar hoje × ontem, homologação × produção) ----------
+// Cada envio guarda a resposta no computador (pasta de dados, cifrada pelo Windows). Até 20 por requisição; fixadas não saem.
+const respKeyOf = (ref, req) => (ref && ref.reqId) || `${String(req.method || 'GET').toUpperCase()} ${String(req.url || '').trim()}`;
+const respKey = (tab) => respKeyOf(tab.ref, tab.draft);
+const savedOn = () => !!api.responses && settings().keepResponses !== false;
+async function recordResponse(key, req, res, env, label = '') {
+  if (!savedOn() || !res || !res.ok) return null;
+  try {
+    const r = await api.responses.add(key, { envId: env?.id || '', envName: env?.name || '', method: req.method, url: (res.request && res.request.url) || res.url || '', status: res.status, statusText: res.statusText, time: res.time, size: res.size, contentType: res.contentType, headers: res.headers, body: res.body ?? null, label });
+    for (const t of session().tabs) if (respKey(t) === key) { const st = rt(t); st.saved = r.list; st.savedKey = key; }
+    return r.entry;
+  } catch { return null; }
+}
+function loadSaved(tab, force = false) {
+  const st = rt(tab), key = respKey(tab);
+  if (!savedOn() || (!force && st.savedKey === key)) return;
+  st.savedKey = key; st.saved = st.saved && st.savedKey === key ? st.saved : null;
+  api.responses.list(key).then((list) => { if (st.savedKey !== key) return; st.saved = list; if (activeTab() === tab) renderResponse(); }).catch(() => {});
+}
+const savedWhen = (t) => {
+  const d = new Date(t), now = new Date();
+  const hm = d.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(now) - day(d)) / 86400000);
+  return diff === 0 ? `hoje ${hm}` : diff === 1 ? `ontem ${hm}` : `${d.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' })} ${hm}`;
+};
+const savedName = (e) => [e.envName || 'sem ambiente', savedWhen(e.at)].join(' · ');
+const savedAsRes = (e) => ({ ok: true, status: e.status, statusText: e.statusText, time: e.time, size: e.size, contentType: e.contentType, headers: e.headers || [], body: e.binary ? null : e.body, url: e.url, stored: savedName(e) + (e.label ? ` · ${e.label}` : ''), storedId: e.id });
+async function compareSaved(tab, a, b) {
+  // a e b: entrada guardada (meta) ou { live: true } para a resposta atual
+  const st = rt(tab), key = respKey(tab);
+  const ids = [a, b].filter((x) => !x.live).map((x) => x.id);
+  const full = ids.length ? await api.responses.get(key, ids) : [];
+  const resOf = (x) => (x.live ? st.liveResponse || st.response : savedAsRes(full.find((f) => f.id === x.id) || x));
+  const nameOf = (x) => (x.live ? `atual${activeEnv() ? ' · ' + activeEnv().name : ''}` : savedName(x));
+  // mais antiga em A, mais nova em B
+  let [x, y] = [a, b];
+  const at = (z) => (z.live ? Infinity : z.at);
+  if (at(x) > at(y)) [x, y] = [y, x];
+  const ra = resOf(x), rb = resOf(y);
+  if (!ra || !rb) return toast('Resposta não encontrada.', 2200);
+  if (!st.liveResponse && st.response && !st.response.stored) st.liveResponse = st.response;
+  if (!st.response) st.response = rb;
+  st.compare = { a: { env: nameOf(x), res: ra }, b: { env: nameOf(y), res: rb }, ...diffResponses(ra, rb), saved: true };
+  resTab = 'compare';
+  renderResponse();
+}
+function openSavedAsResponse(tab, e) {
+  const st = rt(tab);
+  api.responses.get(respKey(tab), [e.id]).then(([full]) => {
+    if (!full) return toast('Resposta não encontrada.', 2200);
+    if (st.response && !st.response.stored) st.liveResponse = st.response;
+    st.response = savedAsRes(full); st.compare = null; st.changes = null; st.contract = null; st.scripts = null; st.lang = null;
+    resTab = 'body'; renderResponse();
+  });
+}
+function backToLive(tab) {
+  const st = rt(tab);
+  st.response = st.liveResponse || null; st.compare = null;
+  resTab = st.response ? 'body' : 'saved';
+  renderResponse();
+}
+function renderSaved(body, tab) {
+  const st = rt(tab), key = respKey(tab);
+  const list = st.saved || [];
+  const pick = (st.savedPick ||= []);
+  const envs = [...new Set(list.map((e) => e.envName || 'sem ambiente'))];
+  const filter = st.savedEnv && envs.includes(st.savedEnv) ? st.savedEnv : 'all';
+  const shown = list.filter((e) => filter === 'all' || (e.envName || 'sem ambiente') === filter);
+  const live = st.liveResponse || (st.response && !st.response.stored ? st.response : null);
+  const refresh = (l) => { st.saved = l; st.savedPick = pick.filter((id) => l.some((e) => e.id === id)); renderResponse(); };
+  const wrap = h('div', { class: 'cmp saved' });
+  if (!list.length) {
+    wrap.append(h('div', { class: 'empty', style: 'padding:24px 8px' }, h('strong', {}, 'Nenhuma resposta guardada'),
+      savedOn() ? 'Cada envio desta requisição fica guardado aqui (até 20, só neste computador). Envie em ambientes diferentes para comparar homologação × produção.' : 'Guardar respostas está desligado em Configurações.'));
+    body.append(wrap); return;
+  }
+  // atalhos: último de cada ambiente
+  const latestBy = new Map();
+  for (const e of list) { const k = e.envName || 'sem ambiente'; if (!latestBy.has(k)) latestBy.set(k, e); }
+  const quick = [];
+  const prev = list.find((e) => !live || e.id !== live.savedId);
+  if (live && prev) quick.push({ label: 'Atual × anterior', run: () => compareSaved(tab, prev, { live: true }) });
+  else if (list.length >= 2) quick.push({ label: 'Última × anterior', run: () => compareSaved(tab, list[1], list[0]) });
+  const envPos = (n) => { const i = data.environments.findIndex((e) => e.name === n); return i < 0 ? 999 : i; };
+  const ks = [...latestBy.keys()].sort((x, y) => envPos(x) - envPos(y));
+  for (let i = 0; i < ks.length && quick.length < 4; i++) for (let j = i + 1; j < ks.length && quick.length < 4; j++) quick.push({ label: `${ks[i]} × ${ks[j]}`, run: () => compareSaved(tab, latestBy.get(ks[i]), latestBy.get(ks[j])) });
+  const chip = (k, l) => h('button', { class: 'chip' + (filter === k ? ' active' : ''), onclick: () => { st.savedEnv = k; renderResponse(); } }, l);
+  wrap.append(
+    h('div', { class: 'cmp-bar' },
+      h('span', { class: 'cmp-summary same' }, `${list.length} resposta${list.length > 1 ? 's' : ''} guardada${list.length > 1 ? 's' : ''}`),
+      h('span', { class: 'muted small' }, 'só neste computador'),
+      h('div', { class: 'grow' }),
+      envs.length > 1 ? h('div', { class: 'radio-row', style: 'margin:0' }, chip('all', 'Todos'), envs.map((e) => chip(e, e))) : null),
+    quick.length ? h('div', { class: 'sv-quick' }, h('span', { class: 'muted small' }, 'Comparar:'), quick.map((q) => h('button', { class: 'btn-ghost sm', onclick: q.run }, q.label)),
+      h('div', { class: 'grow' }),
+      h('button', { class: 'btn-primary sm', disabled: pick.length !== 2, title: 'Marque duas respostas na lista', onclick: () => compareSaved(tab, list.find((e) => e.id === pick[0]), list.find((e) => e.id === pick[1])) }, pick.length === 2 ? 'Comparar as 2 marcadas' : `Marque 2 para comparar${pick.length ? ' (1)' : ''}`)) : null);
+  const table = h('table', { class: 'cmp-table sv-table' },
+    h('tr', {}, h('th', {}, ''), h('th', {}, 'Quando'), h('th', {}, 'Ambiente'), h('th', {}, 'Status'), h('th', {}, 'Tempo'), h('th', {}, 'Tamanho'), h('th', {}, '')),
+    shown.map((e) => {
+      const on = pick.includes(e.id);
+      const box = h('input', { type: 'checkbox', checked: on, title: 'Marcar para comparar', onchange: () => {
+        const i = pick.indexOf(e.id);
+        if (i >= 0) pick.splice(i, 1); else { pick.push(e.id); if (pick.length > 2) pick.shift(); }
+        renderResponse();
+      } });
+      const viewing = st.response && st.response.storedId === e.id;
+      return h('tr', { class: (on ? 'on ' : '') + (viewing ? 'viewing' : '') },
+        h('td', {}, box),
+        h('td', { class: 'sv-when' }, e.pinned ? h('span', { class: 'sv-pin', title: 'Fixada: não sai da lista' }, '★') : null, savedWhen(e.at), e.label ? h('span', { class: 'tag' }, e.label) : null),
+        h('td', {}, e.envName ? h('span', { class: 'hist-env' }, e.envName) : h('span', { class: 'muted small' }, '—')),
+        h('td', {}, h('span', { class: `status s${String(e.status)[0]}` }, String(e.status ?? ''))),
+        h('td', { class: 'muted' }, e.time != null ? fmtTime(e.time) : '—'),
+        h('td', { class: 'muted' }, e.size != null ? fmtBytes(e.size) + (e.truncated ? ' (cortada)' : '') : '—'),
+        h('td', { class: 'sv-acts' },
+          h('button', { class: 'btn-text sm', onclick: () => openSavedAsResponse(tab, e) }, 'Abrir'),
+          live && !viewing && live.savedId !== e.id ? h('button', { class: 'btn-text sm', title: 'Comparar com a resposta atual', onclick: () => compareSaved(tab, e, { live: true }) }, 'Com a atual') : null,
+          h('button', { class: 'more', title: 'Opções', onclick: (ev) => showMenu(ev.currentTarget, [
+            { label: e.pinned ? 'Desafixar' : 'Fixar como referência', run: () => api.responses.update(key, e.id, { pinned: !e.pinned }).then(refresh) },
+            { label: 'Dar um nome…', run: async () => { const o = await promptModal({ title: 'Nome da resposta', sub: 'Ex.: "antes da versão 2.3", "referência produção".', label: 'Nome', value: e.label || '' }); if (o) api.responses.update(key, e.id, { label: o.value }).then(refresh); } },
+            '-',
+            { label: 'Excluir', run: () => api.responses.remove(key, e.id).then(refresh) },
+          ]) }, '⋯')));
+    }));
+  wrap.append(table,
+    h('div', { class: 'row-actions', style: 'margin-top:10px' }, h('span', { class: 'muted small' }, 'Fixe uma resposta como referência para ela não sair da lista. As respostas ficam cifradas no seu computador e não vão para o time.'),
+      h('div', { class: 'grow' }),
+      h('button', { class: 'btn-text sm', onclick: async () => { if (await confirmModal({ title: 'Limpar respostas guardadas?', sub: 'As fixadas continuam.', ok: 'Limpar' })) api.responses.clear(key).then(refresh); } }, 'Limpar')));
   body.append(wrap);
 }
 
@@ -3846,6 +4705,14 @@ function renderResponse() {
     return;
   }
   const res = state.response;
+  loadSaved(tab);
+  if (!res && state.saved && state.saved.length) {
+    resTab = 'saved';
+    const body = h('div', { class: 'res-body pad' });
+    renderSaved(body, tab);
+    pane.append(h('div', { class: 'res-head' }, h('nav', { class: 'subtabs' }, h('button', { class: 'active' }, `Respostas ${state.saved.length}`)), h('div', { class: 'res-tools' }), h('div', { class: 'metrics' }, h('span', { class: 'muted small' }, 'Envie para ver a resposta atual'))), body);
+    return;
+  }
   if (!res) {
     pane.append(h('div', { class: 'placeholder', html: '<div><div class="big">mono</div>Envie uma requisição para ver a resposta.<br><span class="small"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> envia · <kbd>Ctrl</kbd> + <kbd>S</kbd> salva · <kbd>Ctrl</kbd> + <kbd>T</kbd> nova aba</span></div>' }));
     return;
@@ -3880,6 +4747,7 @@ function renderResponse() {
   if (vis) tabs.push(['visualize', 'Visualizar']);
   if (ch) tabs.push(['changes', `Mudanças${ch.list.length ? ' ' + ch.list.length : ''}`]);
   if (ct) tabs.push(['contract', 'Contrato']);
+  if (state.saved && state.saved.length) tabs.push(['saved', `Respostas ${state.saved.length}`]);
   if (!tabs.some(([k]) => k === resTab)) resTab = 'body';
 
   const Format = window.MonoFormat;
@@ -3905,6 +4773,8 @@ function renderResponse() {
       null),
     h('div', { class: 'metrics' },
       h('span', { class: `status s${String(res.status)[0]}` }, `${res.status} ${res.statusText || ''}`.trim()),
+      res.stored ? h('span', { class: 'flag', title: 'Resposta guardada — não é a resposta atual' }, 'Guardada · ' + res.stored) : null,
+      res.stored || (state.compare && state.compare.saved) ? h('button', { class: 'btn-text sm', onclick: () => backToLive(tab) }, state.liveResponse ? '← Resposta atual' : '← Respostas') : null,
       res.example != null ? h('span', { class: 'flag', title: 'Exemplo salvo — não é uma resposta ao vivo' }, 'Exemplo · ' + res.example) : h('span', {}, 'Tempo ', h('b', {}, fmtTime(res.time))),
       h('span', {}, 'Tamanho ', h('b', {}, fmtBytes(res.size))),
       window.MonoCookies.setCookiesOf(res.headers).length ? h('button', { class: 'flag', title: 'Esta resposta mandou cookies — guardados para as próximas requisições', onclick: () => { let host = ''; try { host = new URL(res.url || (res.request && res.request.url)).hostname; } catch { /* sem url */ } openCookies(host); } }, `Cookies ${window.MonoCookies.setCookiesOf(res.headers).length}`) : null,
@@ -3956,6 +4826,9 @@ function renderResponse() {
   } else if (resTab === 'changes') {
     body.classList.add('pad');
     renderChanges(body, ch);
+  } else if (resTab === 'saved') {
+    body.classList.add('pad');
+    renderSaved(body, tab);
   } else if (resTab === 'contract') {
     body.classList.add('pad');
     renderContract(body, ct);
@@ -4212,6 +5085,9 @@ async function saveActive() {
     tab.draft.folderId = folderId || null;
     const req = clone(tab.draft);
     req.id = uid('req');
+    const draftKey = respKey(tab);
+    if (savedOn()) api.responses.rename(draftKey, req.id).catch(() => {});
+    rt(tab).savedKey = null;
     col.requests.push(req); col.open = true;
     for (const f of folderPath(col, req.folderId)) f.open = true;
     tab.ref = { colId: col.id, reqId: req.id };
@@ -4359,7 +5235,7 @@ function renderSidebarCore() {
   const q = $('#sideSearch').value.trim().toLowerCase();
   list.innerHTML = '';
   $$('.sidebar .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.side === side));
-  $('#newCollectionBtn').textContent = side === 'collections' ? '+ Nova coleção' : 'Limpar histórico';
+  $('#newCollectionBtn').textContent = side === 'collections' ? '+ Nova coleção' : side === 'flows' ? '+ Novo fluxo' : 'Limpar histórico';
   $('#importSpecBtn').classList.toggle('hidden', side !== 'collections');
   const activeRef = activeTab()?.ref;
 
@@ -4460,6 +5336,8 @@ function renderSidebarCore() {
         list.append(row);
       }
     }
+  } else if (side === 'flows') {
+    renderFlowsSide(list, q);
   } else {
     const items = data.history.filter((x) => !q || x.url.toLowerCase().includes(q));
     if (!items.length) { list.append(h('div', { class: 'empty' }, h('strong', {}, 'Histórico vazio'), 'Cada envio aparece aqui.')); return; }
@@ -4751,7 +5629,9 @@ function openSettings(section = 'proxy') {
         pane.append(h('h3', {}, 'Requisições'), h('p', { class: 'hint' }, 'Comportamento padrão de todas as requisições.'),
           h('div', { class: 'field' }, h('label', {}, 'Tempo limite (segundos)'), tm),
           check(r, 'followRedirects', 'Seguir redirecionamentos', 'segue 301/302/307 automaticamente'),
-          check(r, 'sslVerify', 'Verificar certificados SSL', 'desative só para ambientes internos com certificado próprio (HOM, DEV)'));
+          check(r, 'sslVerify', 'Verificar certificados SSL', 'desative só para ambientes internos com certificado próprio (HOM, DEV)'),
+          h('label', { class: 'check-row' }, h('input', { type: 'checkbox', checked: st.keepResponses !== false, onchange: (e) => { st.keepResponses = e.target.checked; persist(); } }),
+            h('span', {}, h('b', {}, 'Guardar respostas para comparar'), ' — as últimas 20 de cada requisição, cifradas, só neste computador')));
       }
     };
     body.append(h('h2', {}, 'Configurações'), h('p', { class: 'sub' }, 'Preferências globais — valem para todas as coleções e ambientes.'),
@@ -4826,6 +5706,7 @@ function bind() {
   $$('.sidebar .seg-btn').forEach((b) => b.addEventListener('click', () => { side = b.dataset.side; renderSidebar(); }));
   $('#sideSearch').addEventListener('input', renderSidebar);
   $('#newCollectionBtn').addEventListener('click', async () => {
+    if (side === 'flows') return newFlowPrompt();
     if (side === 'history') {
       if (data.history.length && await confirmModal({ title: 'Limpar histórico?', sub: `${data.history.length} envios serão apagados.`, ok: 'Limpar' })) { data.history = []; persist(); renderSidebar(); }
       return;
@@ -4849,6 +5730,18 @@ function bind() {
   document.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
     if (mod && !e.altKey && (e.key === 'k' || e.key === 'K' || e.key === 'p' || e.key === 'P')) { e.preventDefault(); if ($('#modal').classList.contains('hidden') || !$('#modalBody').classList.contains('palette')) openSearch(); return; }
+    if (flowOpen() && $('#modal').classList.contains('hidden')) {
+      const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '') || document.activeElement?.isContentEditable;
+      if (!typing && (e.key === 'Delete' || e.key === 'Backspace') && !flowRO()) {
+        const f = flowById(flowUi.id);
+        if (flowUi.selEdge) { f.edges = f.edges.filter((x) => x.id !== flowUi.selEdge); flowUi.selEdge = null; persist(); renderFlow(); e.preventDefault(); }
+        else if (flowUi.sel) { const n = Flows.nodeById(f, flowUi.sel); if (n && n.type !== 'start') { Flows.removeNode(f, n.id); flowUi.sel = null; persist(); renderFlow(); e.preventDefault(); } }
+        return;
+      }
+      if (mod && e.key === 'Enter') { e.preventDefault(); runFlowNow(flowById(flowUi.id)); return; }
+      if (mod && ['s', 't', 'w'].includes(e.key.toLowerCase())) { e.preventDefault(); return; }
+      if (!typing && e.key === 'Escape') { closeFlow(); return; }
+    }
     if (!mod || !$('#modal').classList.contains('hidden')) return;
     const k = e.key.toLowerCase();
     if (e.altKey && k === 'l') { e.preventDefault(); toggleLayout(); }

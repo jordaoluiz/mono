@@ -34,6 +34,7 @@
       environments: (d.environments || []).map((e) => ({ ...clone(e), vars: hideSecrets(e.vars) })),
       globals: { ...clone(d.globals || {}), vars: hideSecrets((d.globals || {}).vars) },
       monitors: (d.monitors || []).map((m) => clone(m)),
+      flows: (d.flows || []).map((f) => clone(f)),
     };
   }
 
@@ -75,6 +76,9 @@
     ops.push(...diffList(base.monitors || [], cur.monitors || [], {
       up: (v) => ({ t: 'mon', id: v.id, v }), del: (id) => ({ t: 'monDel', id }), order: (list) => ({ t: 'monOrder', ids: list }),
     }));
+    ops.push(...diffList(base.flows || [], cur.flows || [], {
+      up: (v) => ({ t: 'flow', id: v.id, v }), del: (id) => ({ t: 'flowDel', id }), order: (list) => ({ t: 'flowOrder', ids: list }),
+    }));
     return ops;
   }
 
@@ -105,7 +109,7 @@
 
   // Aplica as operações em `d` (estado do app ou documento do servidor) e devolve `d`.
   function applyOps(d, ops) {
-    d.collections ||= []; d.environments ||= []; d.globals ||= { vars: [] }; d.monitors ||= [];
+    d.collections ||= []; d.environments ||= []; d.globals ||= { vars: [] }; d.monitors ||= []; d.flows ||= [];
     const col = (id) => d.collections.find((c) => c.id === id);
     for (const op of ops || []) {
       const v = clone(op.v);
@@ -126,6 +130,9 @@
         case 'mon': upsert(d.monitors, v, (old, n) => n); break;
         case 'monDel': remove(d.monitors, op.id); break;
         case 'monOrder': reorder(d.monitors, op.ids); break;
+        case 'flow': upsert(d.flows, v, (old, n) => n); break;
+        case 'flowDel': remove(d.flows, op.id); break;
+        case 'flowOrder': reorder(d.flows, op.ids); break;
         default: break;
       }
     }
@@ -133,7 +140,7 @@
   }
 
   // Validação feita pelo servidor antes de gravar (o app nunca manda algo diferente disso).
-  const TYPES = new Set(['col', 'colDel', 'colOrder', 'fold', 'foldDel', 'foldOrder', 'req', 'reqDel', 'reqOrder', 'env', 'envDel', 'envOrder', 'globals', 'mon', 'monDel', 'monOrder']);
+  const TYPES = new Set(['col', 'colDel', 'colOrder', 'fold', 'foldDel', 'foldOrder', 'req', 'reqDel', 'reqOrder', 'env', 'envDel', 'envOrder', 'globals', 'mon', 'monDel', 'monOrder', 'flow', 'flowDel', 'flowOrder']);
   const okId = (s) => typeof s === 'string' && s.length > 0 && s.length <= 120;
   function validOps(ops) {
     if (!Array.isArray(ops) || ops.length > 5000) return 'Lista de alterações inválida.';
@@ -142,10 +149,11 @@
       if (/Order$/.test(op.t)) { if (!Array.isArray(op.ids) || !op.ids.every(okId)) return 'Ordem inválida.'; }
       else if (op.t !== 'globals' && !okId(op.id)) return 'Identificador inválido.';
       if (['fold', 'foldDel', 'foldOrder', 'req', 'reqDel', 'reqOrder'].includes(op.t) && !okId(op.col)) return 'Coleção inválida.';
-      if (['col', 'fold', 'req', 'env', 'globals', 'mon'].includes(op.t)) {
+      if (['col', 'fold', 'req', 'env', 'globals', 'mon', 'flow'].includes(op.t)) {
         if (!op.v || typeof op.v !== 'object' || Array.isArray(op.v)) return 'Conteúdo inválido.';
         if (op.t !== 'globals' && op.v.id !== op.id) return 'Identificador não confere.';
       }
+      if (op.t === 'flow' && (!Array.isArray(op.v.nodes) || !Array.isArray(op.v.edges) || op.v.nodes.length > 500 || op.v.edges.length > 2000)) return 'Fluxo inválido.';
     }
     return null;
   }
@@ -161,9 +169,10 @@
       if (kind === 'fold') return find(colOf(op.col) && colOf(op.col).folders, op.id);
       if (kind === 'env') return find(before && before.environments, op.id);
       if (kind === 'mon') return find(before && before.monitors, op.id);
+      if (kind === 'flow') return find(before && before.flows, op.id);
       return null;
     };
-    const label = { col: 'a coleção', fold: 'a pasta', req: '', env: 'o ambiente', mon: 'o monitor' };
+    const label = { col: 'a coleção', fold: 'a pasta', req: '', env: 'o ambiente', mon: 'o monitor', flow: 'o fluxo' };
     const phrases = [];
     for (const op of ops || []) {
       if (/Order$/.test(op.t)) continue;
@@ -186,7 +195,7 @@
   // Operações que desfazem `ops` quando aplicadas depois delas. `before` é o estado anterior (formato shareable).
   function inverseOps(before, ops) {
     const work = clone(before || shareable({}));
-    work.collections ||= []; work.environments ||= []; work.globals ||= { vars: [] }; work.monitors ||= [];
+    work.collections ||= []; work.environments ||= []; work.globals ||= { vars: [] }; work.monitors ||= []; work.flows ||= [];
     const groups = [];
     const find = (list, id) => (list || []).find((x) => x.id === id);
     const col = (id) => find(work.collections, id);
@@ -221,21 +230,22 @@
           break;
         }
         case 'foldOrder': case 'reqOrder': { const c = col(op.col); if (c) g.push({ t: op.t, col: op.col, ids: ids(op.t === 'foldOrder' ? c.folders : c.requests) }); break; }
-        case 'env': case 'mon': {
-          const list = op.t === 'env' ? work.environments : work.monitors;
+        case 'env': case 'mon': case 'flow': {
+          const list = op.t === 'env' ? work.environments : op.t === 'mon' ? work.monitors : work.flows;
           const old = find(list, op.id);
           g.push(old ? { t: op.t, id: op.id, v: clone(old) } : { t: op.t + 'Del', id: op.id });
           break;
         }
-        case 'envDel': case 'monDel': {
-          const kind = op.t.slice(0, 3);
-          const list = kind === 'env' ? work.environments : work.monitors;
+        case 'envDel': case 'monDel': case 'flowDel': {
+          const kind = op.t.replace(/Del$/, '');
+          const list = kind === 'env' ? work.environments : kind === 'mon' ? work.monitors : work.flows;
           const old = find(list, op.id);
           if (old) g.push({ t: kind, id: op.id, v: clone(old) }, { t: kind + 'Order', ids: ids(list) });
           break;
         }
         case 'envOrder': g.push({ t: 'envOrder', ids: ids(work.environments) }); break;
         case 'monOrder': g.push({ t: 'monOrder', ids: ids(work.monitors) }); break;
+        case 'flowOrder': g.push({ t: 'flowOrder', ids: ids(work.flows) }); break;
         case 'globals': g.push({ t: 'globals', v: clone(work.globals) }); break;
         default: break;
       }
@@ -259,7 +269,7 @@
       if (!name && before) {
         const c = find(before.collections, kind === 'col' ? op.id : op.col);
         const prev = kind === 'col' ? c : kind === 'req' ? find(c && c.requests, op.id) : kind === 'fold' ? find(c && c.folders, op.id)
-          : kind === 'env' ? find(before.environments, op.id) : kind === 'mon' ? find(before.monitors, op.id) : null;
+          : kind === 'env' ? find(before.environments, op.id) : kind === 'mon' ? find(before.monitors, op.id) : kind === 'flow' ? find(before.flows, op.id) : null;
         name = prev && prev.name;
       }
       out.push({ t: kind, del: /Del$/.test(op.t), col: op.col || null, id: op.id || null, name: name || (kind === 'globals' ? 'variáveis globais' : '') });

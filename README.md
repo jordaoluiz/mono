@@ -34,7 +34,9 @@
   - [Cofre de segredos do time](#cofre-de-segredos-do-time)
   - [Scripts e testes (API pm.* do Postman)](#scripts-e-testes-api-pm-do-postman)
   - [Collection Runner com CSV](#collection-runner-com-csv)
+  - [Fluxos visuais](#fluxos-visuais)
   - [Comparar ambientes](#comparar-ambientes)
+  - [Respostas guardadas: hoje × ontem](#respostas-guardadas-hoje--ontem)
   - [Gerar tipos e gerar código](#gerar-tipos-e-gerar-código)
   - [Corpo da requisição](#corpo-da-requisição)
   - [GraphQL, WebSocket e SSE](#graphql-websocket-e-sse)
@@ -217,6 +219,28 @@ Menu ⋯ da coleção › **Executar coleção** (ou de uma pasta). Escolha as r
 - `pm.execution.setNextRequest()` muda a ordem da execução.
 - O relatório exporta em HTML ou JSON.
 
+### Fluxos visuais
+
+Na aba **Fluxos** da barra lateral, você monta um fluxo de requisições num quadro, sem escrever script. Por exemplo: login → criar pedido → para cada item, consultar → avisar se faltar estoque.
+
+![Fluxo](docs/screenshots/35-fluxo.png)
+
+1. **Montar:** arraste as requisições da coleção para o quadro, na ordem. Cada uma já se liga à anterior. Para ligar à mão, arraste a bolinha de baixo de um bloco até o próximo. Clicar na bolinha desfaz a ligação.
+2. **Passar valores:** em **Guardar da resposta**, cada valor da resposta vira uma variável: `token` vem de `access_token`, `pedidoId` vem de `id`. Pode ser JSON, XML (`cStat`, `protNFe/nProt`), header, status ou regex. Também dá para escolher o campo clicando, em **Escolher da última resposta…**. Nas próximas requisições, é só usar `{{token}}` na URL, nos headers, no corpo ou na autorização.
+3. **Decidir e repetir:**
+   - **Condição** segue por *sim* ou *não*. Por exemplo: `{{res.status}}` é igual a 200, ou `{{estoque}}` maior que 0.
+   - **Repetir** roda N vezes, para cada item de uma lista ou enquanto uma condição valer. Ex.: consultar o recibo da SEFAZ a cada 2 s até `{{cStat}}` ser 100, no máximo 20 vezes.
+   - **Definir variáveis** e **Esperar** completam os blocos.
+4. **Executar:** o fluxo roda no ambiente ativo, com os scripts, testes, autorização, cookies e certificado de cada requisição. Os blocos acendem conforme rodam, e o painel mostra cada passo, os valores guardados e a resposta.
+
+![Execução do fluxo](docs/screenshots/36-fluxo-execucao.png)
+
+**Falhas:** um erro de rede, um teste reprovado ou um status 4xx/5xx contam como falha (o status pode deixar de contar). Se a saída **falhou** de uma requisição estiver ligada, o fluxo segue por ela. Se não estiver, o fluxo para ali e mostra o bloco em vermelho. Em produção, o Mono pede confirmação antes de rodar requisições que alteram dados.
+
+**No time:** os fluxos ficam no workspace e sincronizam com o time, como as coleções. Cada pessoa executa no próprio Mono.
+
+**Atalhos:** Ctrl + Enter executa, Delete apaga o bloco ou a ligação selecionada e Esc volta às requisições. Arraste o fundo para mover o quadro e use Ctrl + roda para o zoom.
+
 ### Comparar ambientes
 
 ![Comparar ambientes](docs/screenshots/08-comparar-ambientes.png)
@@ -224,6 +248,18 @@ Menu ⋯ da coleção › **Executar coleção** (ou de uma pasta). Escolha as r
 O botão **Comparar** envia a mesma requisição para dois ambientes ao mesmo tempo (ex.: produção × homologação) e mostra lado a lado o status, o tempo e cada diferença no JSON: valor, tipo, campo que só existe de um lado. Dá para ignorar campos voláteis como `timestamp`.
 
 O Mono também guarda a estrutura da última resposta de cada endpoint e avisa em **Mudanças** quando aparece campo novo, some um campo ou muda um tipo. Com OpenAPI, a resposta é validada contra o contrato (selo **Contrato**).
+
+### Respostas guardadas: hoje × ontem
+
+Cada envio guarda a resposta no seu computador, cifrada pelo Windows: até 20 por requisição, junto com o ambiente e o horário. A aba **Respostas** da resposta lista todas e compara duas delas campo a campo, com a mesma tela do Comparar:
+
+- **Atual × anterior:** o que mudou na API desde o último envio, ou desde ontem.
+- **Homologação × Produção:** compara a última resposta de cada ambiente, sem enviar de novo.
+- **Duas quaisquer:** marque duas na lista e clique em **Comparar as 2 marcadas**.
+
+![Respostas guardadas](docs/screenshots/34-respostas-guardadas.png)
+
+Use **Fixar como referência** para guardar uma resposta "boa" que não sai da lista, e dê um nome a ela, como "antes da versão 2.3". As respostas não vão para o servidor nem para o time. Para desligar, vá em **Configurações › Requisições**.
 
 ### Gerar tipos e gerar código
 

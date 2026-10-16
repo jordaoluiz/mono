@@ -1,14 +1,14 @@
 {
   "name": "mono-api-client",
   "productName": "Mono",
-  "version": "0.1.4",
+  "version": "0.1.3",
   "description": "Cliente de APIs (REST e SOAP) em preto e branco",
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
     "debug": "electron . --devtools --enable-logging",
-    "test": "node test/http.test.js && node test/shared.test.js && node test/docs.test.js && node test/scripts.test.js && node test/runner.test.js && node test/codegen.test.js && node test/certs.test.js && node test/soap.test.js && node test/sync.test.js && node test/cloud.test.js && node test/collab.test.js && node test/mock.test.js && node test/realtime.test.js && node test/graphql.test.js && node test/account.test.js && node test/vault.test.js && node test/testgen.test.js && node test/cookies.test.js && node test/gitfs.test.js",
+    "test": "node test/http.test.js && node test/shared.test.js && node test/docs.test.js && node test/scripts.test.js && node test/runner.test.js && node test/codegen.test.js && node test/certs.test.js && node test/soap.test.js && node test/sync.test.js && node test/cloud.test.js && node test/collab.test.js && node test/mock.test.js && node test/realtime.test.js && node test/graphql.test.js && node test/account.test.js && node test/vault.test.js && node test/testgen.test.js && node test/cookies.test.js && node test/gitfs.test.js && node test/flows.test.js && node test/resplog.test.js",
     "dist": "electron-builder --win nsis",
     "release": "electron-builder --win nsis --publish always"
   },
