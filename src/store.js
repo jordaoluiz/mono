@@ -35,7 +35,7 @@ function mapSecrets(data, fn) {
   return out;
 }
 // Campos das configurações que vão criptografados para o disco.
-const SETTING_SECRETS = [['proxy', 'password'], ['ai', 'apiKey'], ['ai', 'openaiKey'], ['postman', 'apiKey'], ['cloud', 'token']];
+const SETTING_SECRETS = [['proxy', 'password'], ['ai', 'apiKey'], ['ai', 'openaiKey'], ['postman', 'apiKey'], ['cloud', 'token'], ['vault', 'privateKey']];
 
 function createStore(dir, crypto = null) {
   const file = path.join(dir, 'mono-data.json');

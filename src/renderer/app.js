@@ -102,7 +102,7 @@ const fill = (s, vars) => String(s || '').replace(/\{\{\s*(\$?[\w.-]+)\s*\}\}/g,
 // Cada workspace tem suas coleções, ambientes, globais, histórico e abas. O ativo fica no topo de `data`
 // (o resto do app não precisa saber que workspaces existem); os outros ficam guardados em workspaces[].data.
 // Configurações (proxy, certificados, IA) e o tema valem para todos.
-const WS_KEYS = ['collections', 'history', 'environments', 'activeEnvId', 'globals', 'session', 'snapshots', 'lastRun', 'monitors'];
+const WS_KEYS = ['collections', 'history', 'environments', 'activeEnvId', 'globals', 'session', 'snapshots', 'lastRun', 'monitors', 'cookies'];
 const activeWorkspace = () => data.workspaces.find((w) => w.id === data.activeWorkspaceId);
 function ensureWorkspaces() {
   data.workspaces ||= [];
@@ -111,7 +111,7 @@ function ensureWorkspaces() {
   activeWorkspace().data = null;
 }
 function normalizeWorkspace() {
-  data.collections ||= []; data.history ||= []; data.environments ||= []; data.globals ||= { vars: [] }; data.monitors ||= [];
+  data.collections ||= []; data.history ||= []; data.environments ||= []; data.globals ||= { vars: [] }; data.monitors ||= []; data.cookies ||= [];
   if (data.activeEnvId && !envById(data.activeEnvId)) data.activeEnvId = data.environments[0]?.id || '';
   const s = session();
   s.tabs = s.tabs.filter((t) => t && t.draft);
@@ -149,6 +149,7 @@ function switchWorkspace(id, { quiet = false } = {}) {
   persist();
   renderWorkspaceBtn(); renderEnvSelect(); renderTabs(); renderRequest(); renderResponse(); renderSidebar();
   if (target.shared && loggedIn()) { loadComments(target); loadMonitorRuns(target); }
+  if (api.git) for (const col of data.collections) if (col.gitDir) gitStartupSync(col);
   renderMonAlert();
   if (!quiet) toast(`Workspace: ${target.name}`);
 }
@@ -189,6 +190,8 @@ function openWorkspaceMenu(anchor) {
   items.push({ label: cur.shared ? 'Pessoas e convites…' : 'Compartilhar este workspace…', run: () => openShare(cur) });
   if (cur.shared) items.push({ label: 'Histórico de alterações…', run: () => openHistory(cur) });
   items.push({ label: 'Monitores…', run: () => openMonitors(cur) });
+  items.push({ label: 'Cookies…', run: () => openCookies() });
+  items.push({ label: 'Abrir coleção de uma pasta (Git)…', run: () => openGitCollection() });
   items.push({ label: '+ Novo workspace', run: () => openWorkspaceForm() }, { label: 'Gerenciar workspaces…', run: openWorkspaces });
   showMenu(anchor, items);
 }
@@ -348,6 +351,7 @@ function applyRemote(w, ops) {
   const local = wsData(w);
   Sync.applyOps(local, ops);
   w.shared.base = Sync.applyOps(w.shared.base || Sync.shareable({}), ops);
+  if (vaultReady(w) && ops.some((o) => o.t === 'env' || o.t === 'globals')) openSecrets(w);
   if (w.id !== data.activeWorkspaceId) return;
   const s = session();
   for (const t of s.tabs) {
@@ -379,6 +383,7 @@ async function pushOps(w) {
   if (!canEditWs(w)) { revertViewerChanges(w); return; }
   const id = w.shared.id;
   if (cloud.busy.has(id)) { cloud.again.add(id); return; }
+  if (vaultReady(w)) { cloud.busy.add(id); try { await sealSecrets(w); } finally { cloud.busy.delete(id); } }
   const ops = Sync.diff(w.shared.base || Sync.shareable({}), Sync.shareable(wsData(w)));
   if (!ops.length) return;
   cloud.busy.add(id);
@@ -418,7 +423,8 @@ async function resync(w) {
   const local = wsData(w);
   const pending = Sync.diff(w.shared.base || Sync.shareable({}), Sync.shareable(local));
   Sync.applyOps(local, Sync.diff(Sync.shareable(local), srv.data));
-  Object.assign(w.shared, { base: srv.data, version: srv.version, ownerId: srv.ownerId, members: srv.members, invites: srv.invites || [] });
+  Object.assign(w.shared, { base: srv.data, version: srv.version, ownerId: srv.ownerId, members: srv.members, invites: srv.invites || [], vault: srv.vault || { enabled: false } });
+  if (vaultOn(w)) loadVault(w);
   w.name = srv.name; w.description = srv.description || '';
   cloud.buffer.delete(srv.id); cloud.own.delete(srv.id);
   if (pending.length) Sync.applyOps(local, pending);
@@ -435,8 +441,12 @@ function detachShared(w, msg) {
 function onCloudEvent({ event, data: p }) {
   if (!data) return;
   if (event === 'hello') { refreshInvites(); for (const w of sharedWs()) resync(w); presenceSent = ''; presenceTick(true); const aw = activeWorkspace(); if (aw.shared) { loadComments(aw); loadMonitorRuns(aw); } return; }
+  if (event === 'vault') { const vw = p && p.ws ? wsByShared(p.ws) : null; if (vw) loadVault(vw); return; }
+  if (event === 'logout') { cloudLoggedOut('Esta sessão foi encerrada (troca de senha ou “sair deste computador”). Entre de novo.'); return; }
   if (event === 'profile') {
+    const prevKey = (cloud.profiles.get(p.user.id) || {}).publicKey;
     cloud.profiles.set(p.user.id, p.user);
+    if (p.user.publicKey && p.user.publicKey !== prevKey) for (const vw of sharedWs()) if (vaultReady(vw) && (vw.shared.members || []).some((m) => m.userId === p.user.id)) loadVault(vw);
     if (me() && p.user.id === me().id) { cloudCfg().user = { ...me(), ...p.user }; persist(); }
     repaintAvatars();
     return;
@@ -460,6 +470,7 @@ function onCloudEvent({ event, data: p }) {
     if (w.id === data.activeWorkspaceId) toast(`@${p.by} ${p.change ? p.change.summary : 'alterou ' + Sync.describe(p.ops)}`, 2600);
   } else if (event === 'members') {
     w.shared.members = p.members;
+    if (vaultOn(w) && (p.joined || p.left)) setTimeout(() => loadVault(w), p.left ? 300 : 1500);
     if (p.joined && p.joined !== me()?.username) toast(`@${p.joined} entrou em “${w.name}”`, 3500);
     if (p.left && p.left !== me()?.username) toast(`@${p.left} saiu de “${w.name}”`, 3500);
     if (p.roleChanged === me()?.username) toast(`@${p.by} mudou seu acesso em “${w.name}” para ${p.role === 'viewer' ? 'só leitura' : 'edição'}.`, 5000);
@@ -496,6 +507,8 @@ function openAccount({ then = null } = {}) {
     if (loggedIn()) {
       const st = { online: 'Conectado', connecting: 'Conectando…', offline: 'Sem conexão — tentando de novo', off: 'Desconectado' }[cloud.state] || cloud.state;
       const u = me();
+      const recBtn = h('button', { class: 'btn-ghost sm', onclick: () => { close(); newRecoveryCodes(); } }, 'Códigos de recuperação');
+      cloudCall('GET', '/v1/me').then((r) => { if (r.ok) { recBtn.textContent = `Códigos de recuperação · ${r.data.recoveryLeft} restantes`; recBtn.classList.toggle('warn', r.data.recoveryLeft <= 2); } });
       const big = avatar({ userId: u.id, username: u.username, name: u.name }, 'xl');
       const file = h('input', { type: 'file', accept: 'image/png,image/jpeg,image/webp,image/gif', class: 'hidden' });
       file.addEventListener('change', async () => {
@@ -526,6 +539,11 @@ function openAccount({ then = null } = {}) {
               cur.avatar ? h('button', { class: 'btn-text sm', onclick: async () => { if (await saveProfile({ avatar: '' })) { close(); openAccount(); } } }, 'Remover foto') : null)),
           h('div', { class: 'field' }, h('label', {}, cur.avatar ? 'Cor (usada se tirar a foto)' : 'Cor da inicial'), swatches),
           h('div', { class: 'field' }, h('label', {}, 'Nome que os colegas veem'), nameIn)),
+        h('div', { class: 'field' }, h('label', {}, 'Segurança'),
+          h('div', { class: 'sec-actions' },
+            h('button', { class: 'btn-ghost sm', onclick: () => { close(); openChangePassword(); } }, 'Trocar senha'),
+            recBtn,
+            h('button', { class: 'btn-ghost sm', onclick: () => { close(); openSessions(); } }, 'Onde estou conectado'))),
         h('p', { class: 'sub' }, plural(sharedWs().length, 'workspace compartilhado', 'workspaces compartilhados')),
         h('div', { class: 'modal-actions' },
           h('button', { class: 'btn-ghost', onclick: async () => { await cloudCall('POST', '/v1/logout'); cloudLoggedOut(); close(); toast('Você saiu da conta. Os workspaces continuam aqui, sem sincronizar.', 4000); } }, 'Sair da conta'),
@@ -543,6 +561,7 @@ function openAccount({ then = null } = {}) {
     const title = h('h2', {}), sub = h('p', { class: 'sub' });
     const go = h('button', { class: 'btn-primary' });
     const swap = h('button', { class: 'linklike' });
+    const forgot = h('button', { class: 'linklike', onclick: () => { close(); openRecover(); } }, 'Esqueci a senha');
     const draw = () => {
       const reg = mode === 'register';
       title.textContent = reg ? 'Criar conta no Mono' : 'Entrar no Mono';
@@ -551,6 +570,7 @@ function openAccount({ then = null } = {}) {
       pass.autocomplete = reg ? 'new-password' : 'current-password';
       go.textContent = reg ? 'Criar conta' : 'Entrar';
       swap.textContent = reg ? 'Já tenho conta' : 'Criar uma conta';
+      forgot.classList.toggle('hidden', reg);
       err.classList.add('hidden');
       checkUser();
     };
@@ -576,8 +596,14 @@ function openAccount({ then = null } = {}) {
       Object.assign(c, { url, token: r.data.token, user: r.data.user });
       persist(); renderWorkspaceBtn(); cloudStart();
       close();
-      toast(mode === 'register' ? `Conta criada. Bem-vindo, @${r.data.user.username}!` : `Olá, @${r.data.user.username}!`, 3000);
-      if (then) then();
+      const pw = pass.value;
+      if (mode === 'register') {
+        showRecoveryCodes(r.data.recoveryCodes || [], { title: `Bem-vindo, @${r.data.user.username}! Guarde seus códigos`, then: () => { window.MonoVault?.afterLogin?.(pw, true); if (then) then(); } });
+      } else {
+        toast(`Olá, @${r.data.user.username}!`, 3000);
+        window.MonoVault?.afterLogin?.(pw, false);
+        if (then) then();
+      }
     };
     go.onclick = submit;
     for (const el of [user, pass, name, server]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
@@ -587,9 +613,312 @@ function openAccount({ then = null } = {}) {
       nameField,
       MONO_CLOUD_URL ? null : h('details', { class: 'acct-server', open: !cloudUrl() }, h('summary', {}, 'Servidor'), h('div', { class: 'field' }, server)),
       err,
-      h('div', { class: 'modal-actions spread' }, swap, h('div', { class: 'row-gap' }, h('button', { class: 'btn-ghost', onclick: close }, 'Cancelar'), go)));
+      h('div', { class: 'modal-actions spread' }, h('div', { class: 'row-gap' }, swap, forgot), h('div', { class: 'row-gap' }, h('button', { class: 'btn-ghost', onclick: close }, 'Cancelar'), go)));
     draw();
     setTimeout(() => user.focus(), 0);
+  });
+}
+
+// ---------- Cofre de segredos (criptografia de ponta a ponta) ----------
+// Com o cofre ligado num workspace compartilhado, os valores marcados como segredo (cadeado) vão cifrados para o
+// time: o servidor guarda, mas não consegue ler. Só membros abrem, com a chave privada de cada um.
+const VC = window.MonoVaultCrypto;
+const vaultLocal = () => (settings().vault ||= {});            // { userId, publicKey, privateKey } — privateKey cifrada pelo Windows
+const vaultKeys = new Map();                                   // sharedId → { kid, raw, key }
+const vaultHinted = new Set();
+const myPriv = () => { const v = vaultLocal(); return me() && v.userId === me().id && v.privateKey ? v.privateKey : null; };
+const vaultOn = (w) => !!(w && w.shared && w.shared.vault && w.shared.vault.enabled);
+const vaultReady = (w) => vaultOn(w) && vaultKeys.has(w.shared.id) && vaultKeys.get(w.shared.id).kid === w.shared.vault.kid;
+// Garante o par de chaves desta pessoa neste computador (e publicado no servidor). Sem senha, só usa o que já existe.
+async function ensureMyKeys(password = null) {
+  if (!loggedIn() || !VC) return false;
+  const r = await cloudCall('GET', '/v1/me');
+  if (!r.ok) return false;
+  const pub = r.data.user.publicKey || '', backup = r.data.keyBackup;
+  const loc = vaultLocal();
+  const mine = loc.userId === me().id && loc.privateKey ? loc : null;
+  if (mine && mine.publicKey === pub) {
+    if (!backup && password) await cloudCall('PATCH', '/v1/me', { keyBackup: await VC.backupPrivate(mine.privateKey, password) });
+    return true;
+  }
+  if (pub && backup) {
+    if (!password) return false;
+    try { const priv = await VC.restorePrivate(backup, password); Object.assign(loc, { userId: me().id, publicKey: pub, privateKey: priv }); persist(); return true; }
+    catch { return false; }
+  }
+  if (mine && !pub) {
+    await cloudCall('PATCH', '/v1/me', { publicKey: mine.publicKey, ...(password ? { keyBackup: await VC.backupPrivate(mine.privateKey, password) } : {}) });
+    return true;
+  }
+  if (!password) return false;
+  const kp = await VC.generateUserKeys();
+  Object.assign(loc, { userId: me().id, ...kp }); persist();
+  await cloudCall('PATCH', '/v1/me', { publicKey: kp.publicKey, keyBackup: await VC.backupPrivate(kp.privateKey, password) });
+  return true;
+}
+function unlockVaultPrompt(then) {
+  openModal((body, close) => {
+    const pass = h('input', { type: 'password', autocomplete: 'current-password' });
+    const err = h('p', { class: 'ws-err hidden' });
+    const go = h('button', { class: 'btn-primary' }, 'Abrir o cofre');
+    go.onclick = async () => {
+      go.disabled = true;
+      const ok = await ensureMyKeys(pass.value);
+      go.disabled = false;
+      if (!ok) { err.textContent = 'Senha incorreta.'; err.classList.remove('hidden'); return; }
+      close();
+      for (const w of sharedWs()) if (vaultOn(w)) await loadVault(w);
+      toast('Cofre aberto neste computador', 2200);
+      then?.();
+    };
+    pass.addEventListener('keydown', (e) => { if (e.key === 'Enter') go.click(); });
+    body.append(h('h2', {}, 'Abrir o cofre neste computador'),
+      h('p', { class: 'sub' }, 'Digite a sua senha do Mono uma vez para liberar a sua chave do cofre neste computador. Ela fica guardada aqui, cifrada pelo Windows.'),
+      h('div', { class: 'field' }, h('label', {}, 'Senha'), pass), err,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: close }, 'Agora não'), go));
+    setTimeout(() => pass.focus(), 0);
+  });
+}
+const memberKeysOf = async (w) => {
+  const ids = (w.shared.members || []).map((m) => m.userId);
+  const missing = ids.filter((id) => !cloud.profiles.has(id) || cloud.profiles.get(id).publicKey === undefined);
+  if (missing.length) { const r = await cloudCall('GET', `/v1/profiles?ids=${encodeURIComponent(missing.join(','))}`); if (r.ok) for (const u of r.data.users) cloud.profiles.set(u.id, u); }
+  return ids.map((id) => ({ userId: id, publicKey: (cloud.profiles.get(id) || {}).publicKey || '' }));
+};
+async function loadVault(w) {
+  if (!w.shared || !loggedIn()) return;
+  const r = await cloudCall('GET', `/v1/workspaces/${w.shared.id}/vault`);
+  if (!r.ok || !w.shared) return;
+  const v = r.data.vault;
+  w.shared.vault = v.enabled ? { enabled: true, kid: v.kid } : { enabled: false };
+  if (!v.enabled) { vaultKeys.delete(w.shared.id); persist(); refreshShareModal(w); return; }
+  if (!myPriv() && !vaultHinted.has(w.shared.id)) { vaultHinted.add(w.shared.id); toast(`“${w.name}” usa o cofre de segredos. Para receber os segredos do time, abra Pessoas e convites → Abrir aqui.`, 6500); }
+  if (v.myKey && myPriv() && (!vaultKeys.has(w.shared.id) || vaultKeys.get(w.shared.id).kid !== v.kid)) {
+    try { const raw = await VC.unwrapKey(v.myKey, myPriv()); vaultKeys.set(w.shared.id, { kid: v.kid, raw, key: await VC.importVaultKey(raw) }); }
+    catch { /* chave embrulhada para uma chave antiga: um colega embrulha de novo */ }
+  }
+  if (vaultReady(w)) {
+    // entrega a chave do cofre a quem ainda não tem (ou trocou de chave)
+    const people = await memberKeysOf(w);
+    const vk = vaultKeys.get(w.shared.id);
+    if (v.needsRotation && isOwner(w)) { await rotateVault(w, v.kid); return; }
+    const add = {};
+    for (const p of people) {
+      if (!p.publicKey) continue;
+      const fp = await VC.fingerprint(p.publicKey);
+      const cur = v.keys[p.userId];
+      if (!cur || cur.fp !== fp || cur.kid !== vk.kid) add[p.userId] = await VC.wrapKey(vk.raw, vk.kid, p.publicKey);
+    }
+    if (Object.keys(add).length) await cloudCall('PUT', `/v1/workspaces/${w.shared.id}/vault`, { keys: add });
+    await openSecrets(w);
+    await sealSecrets(w);
+    scheduleSync();
+  }
+  persist(); refreshShareModal(w);
+}
+const secretLists = (d) => [...(d.environments || []).map((e) => e.vars || []), (d.globals || {}).vars || []];
+// Cifra os segredos que mudaram aqui (antes de enviar).
+async function sealSecrets(w) {
+  if (!vaultReady(w)) return false;
+  const { kid, key } = vaultKeys.get(w.shared.id);
+  let changed = false;
+  for (const list of secretLists(wsData(w))) for (const v of list) {
+    if (!v) continue;
+    if (!v.secret) { if (v.vault) { delete v.vault; delete v._vct; delete v._vfp; changed = true; } continue; }
+    const fp = VC.quickFp(v.value ?? '');
+    if (v.vault && v._vct !== v.vault.ct) continue; // chegou valor novo de um colega que ainda não foi aberto
+    if (v.vault && v.vault.kid === kid && v._vfp === fp) continue;
+    if (!v.value) { if (v.vault && v._vfp !== fp) { delete v.vault; delete v._vct; v._vfp = fp; changed = true; } continue; }
+    v.vault = await VC.sealValue(key, kid, v.value);
+    v._vct = v.vault.ct; v._vfp = fp; changed = true;
+  }
+  return changed;
+}
+// Abre os segredos que chegaram do time.
+async function openSecrets(w) {
+  if (!vaultReady(w)) return;
+  const { kid, key } = vaultKeys.get(w.shared.id);
+  let opened = 0;
+  for (const list of secretLists(wsData(w))) for (const v of list) {
+    if (!v || !v.secret || !v.vault || v.vault.kid !== kid || v.vault.ct === v._vct) continue;
+    try { v.value = await VC.openValue(key, v.vault); v._vct = v.vault.ct; v._vfp = VC.quickFp(v.value); opened++; } catch { /* valor corrompido: mantém o local */ }
+  }
+  if (opened) { persist(); if (w.id === data.activeWorkspaceId) { renderEnvSelect(); window.MonoVars?.refresh(); } }
+}
+async function enableVault(w) {
+  if (!myPriv() && !(await ensureMyKeys())) return unlockVaultPrompt(() => enableVault(w));
+  const vk = VC.newVaultKey();
+  const keys = {};
+  const people = await memberKeysOf(w);
+  const mePub = vaultLocal().publicKey;
+  for (const p of people) { const pk = p.userId === me().id ? mePub : p.publicKey; if (pk) keys[p.userId] = await VC.wrapKey(vk.raw, vk.kid, pk); }
+  const r = await cloudCall('PUT', `/v1/workspaces/${w.shared.id}/vault`, { replace: true, prevKid: w.shared.vault?.kid, kid: vk.kid, keys });
+  if (!r.ok) return toast(r.error, 3500);
+  w.shared.vault = { enabled: true, kid: vk.kid };
+  vaultKeys.set(w.shared.id, { kid: vk.kid, raw: vk.raw, key: await VC.importVaultKey(vk.raw) });
+  await sealSecrets(w); persist(); pushOps(w);
+  const waiting = people.filter((p) => !p.publicKey && p.userId !== me().id).length;
+  toast(`Cofre ligado: os segredos deste workspace agora vão cifrados para o time.${waiting ? ` ${plural(waiting, 'pessoa recebe', 'pessoas recebem')} a chave quando abrir o Mono atualizado.` : ''}`, 5000);
+  refreshShareModal(w);
+}
+async function rotateVault(w, prevKid) {
+  const vk = VC.newVaultKey();
+  const keys = {};
+  for (const p of await memberKeysOf(w)) { const pk = p.userId === me().id ? vaultLocal().publicKey : p.publicKey; if (pk) keys[p.userId] = await VC.wrapKey(vk.raw, vk.kid, pk); }
+  const r = await cloudCall('PUT', `/v1/workspaces/${w.shared.id}/vault`, { replace: true, prevKid, kid: vk.kid, keys });
+  if (!r.ok) return;
+  w.shared.vault = { enabled: true, kid: vk.kid };
+  vaultKeys.set(w.shared.id, { kid: vk.kid, raw: vk.raw, key: await VC.importVaultKey(vk.raw) });
+  await sealSecrets(w); persist(); pushOps(w);
+}
+async function disableVault(w) {
+  if (!(await confirmModal({ title: 'Desligar o cofre?', sub: 'Os segredos deixam de ser compartilhados: cada pessoa fica só com o valor que já tem no computador.', ok: 'Desligar' }))) return openShare(w);
+  const r = await cloudCall('PUT', `/v1/workspaces/${w.shared.id}/vault`, { enabled: false });
+  if (!r.ok) return toast(r.error, 3000);
+  w.shared.vault = { enabled: false };
+  vaultKeys.delete(w.shared.id);
+  for (const list of secretLists(wsData(w))) for (const v of list) if (v) { delete v.vault; delete v._vct; delete v._vfp; }
+  persist(); pushOps(w); openShare(w);
+}
+function vaultSection(w) {
+  const on = vaultOn(w), ready = vaultReady(w);
+  const box = h('div', { class: 'vault-box' + (on ? ' on' : '') },
+    h('span', { class: 'vault-ico', html: icons.lock }),
+    h('div', { class: 'ws-info' },
+      h('div', { class: 'ws-title' }, 'Cofre de segredos', on ? h('span', { class: 'ws-badge' }, ready ? 'ligado' : 'ligado · bloqueado aqui') : null),
+      h('div', { class: 'ws-stats' }, on
+        ? (ready ? 'Segredos (cadeado) vão cifrados de ponta a ponta: o servidor guarda, mas não lê. Só membros abrem.' : 'Este computador ainda não tem a sua chave do cofre.')
+        : 'Desligado: cada pessoa preenche os próprios segredos. Ligue para compartilhar tokens e senhas com o time, cifrados de ponta a ponta.')),
+    on && !ready ? h('button', { class: 'btn-ghost sm', onclick: () => unlockVaultPrompt(() => openShare(w)) }, 'Abrir aqui')
+      : !on && canEditWs(w) ? h('button', { class: 'btn-ghost sm', onclick: () => enableVault(w) }, 'Ligar cofre')
+      : on && isOwner(w) ? h('button', { class: 'btn-text sm', onclick: () => disableVault(w) }, 'Desligar') : null);
+  return box;
+}
+window.MonoVault = {
+  afterLogin: async (pw) => { if (await ensureMyKeys(pw)) for (const w of sharedWs()) if (vaultOn(w)) loadVault(w); },
+  afterRecover: async (pw) => { await ensureMyKeys(pw); for (const w of sharedWs()) if (vaultOn(w)) loadVault(w); },
+  backupFor: async (pw) => (myPriv() ? VC.backupPrivate(myPriv(), pw) : undefined),
+};
+
+// ---------- Segurança da conta: senha, códigos de recuperação e sessões ----------
+function showRecoveryCodes(codes, { title = 'Guarde seus códigos de recuperação', mustConfirm = true, then = null } = {}) {
+  openModal((body, close) => {
+    const text = `Códigos de recuperação do Mono — @${me()?.username || ''}\nCada código entra uma vez se você esquecer a senha.\n\n${codes.join('\n')}\n`;
+    const ok = h('input', { type: 'checkbox' });
+    const done = h('button', { class: 'btn-primary', disabled: mustConfirm, onclick: () => { close(); then?.(); } }, 'Pronto');
+    ok.addEventListener('change', () => { done.disabled = !ok.checked; });
+    body.append(h('h2', {}, title),
+      h('p', { class: 'sub' }, 'O Mono não usa e-mail. Se você esquecer a senha, um destes códigos é a única forma de entrar de novo — cada um vale uma vez. Guarde num gerenciador de senhas ou num arquivo seguro.'),
+      h('div', { class: 'rec-codes' }, codes.map((c) => h('code', {}, c))),
+      h('div', { class: 'row-gap' }, copyButton(text, 'Copiar'),
+        h('button', { class: 'btn-ghost sm', onclick: async () => { const r = await api.saveFile({ name: 'mono-codigos-recuperacao.txt', content: text, filters: [{ name: 'Texto', extensions: ['txt'] }] }); if (r && r.ok) toast('Códigos salvos', 1800); } }, 'Salvar em arquivo')),
+      mustConfirm ? h('label', { class: 'check-row' }, ok, h('span', {}, 'Guardei os códigos num lugar seguro')) : null,
+      h('div', { class: 'modal-actions' }, done));
+  });
+}
+function openRecover() {
+  openModal((body, close) => {
+    const user = h('input', { placeholder: 'seu.usuario', spellcheck: 'false', maxlength: 31 });
+    const code = h('input', { placeholder: 'XXXX-XXXX-XXXX', spellcheck: 'false', autocomplete: 'off', class: 'mono-input' });
+    const p1 = h('input', { type: 'password', placeholder: 'mínimo 8 caracteres', autocomplete: 'new-password' });
+    const p2 = h('input', { type: 'password', placeholder: 'repita a senha', autocomplete: 'new-password' });
+    const err = h('p', { class: 'ws-err hidden' });
+    const go = h('button', { class: 'btn-primary' }, 'Redefinir senha e entrar');
+    const show = (m) => { err.textContent = m; err.classList.remove('hidden'); };
+    go.onclick = async () => {
+      if (!Sync.normUser(user.value)) return show('Informe o seu @.');
+      if (!code.value.trim()) return show('Informe um código de recuperação.');
+      if (p1.value.length < 8) return show('A nova senha precisa ter pelo menos 8 caracteres.');
+      if (p1.value !== p2.value) return show('As senhas não conferem.');
+      go.disabled = true;
+      const url = cloudOverride || MONO_CLOUD_URL || cloudUrl();
+      const r = await api.cloud.call({ url, method: 'POST', path: '/v1/recover', body: { username: Sync.normUser(user.value), code: code.value, password: p1.value } });
+      go.disabled = false;
+      if (!r.ok) return show(r.error);
+      Object.assign(cloudCfg(), { url, token: r.data.token, user: r.data.user });
+      persist(); renderWorkspaceBtn(); cloudStart();
+      close();
+      toast(`Senha redefinida. Restam ${r.data.recoveryLeft} códigos de recuperação.`, 5000);
+      window.MonoVault?.afterRecover?.(p1.value);
+    };
+    body.append(h('h2', {}, 'Esqueci a senha'),
+      h('p', { class: 'sub' }, 'Use um dos códigos de recuperação que o Mono mostrou quando você criou a conta. Todas as sessões abertas serão encerradas.'),
+      h('div', { class: 'field' }, h('label', {}, 'Usuário (@)'), h('div', { class: 'at-input' }, h('span', {}, '@'), user)),
+      h('div', { class: 'field' }, h('label', {}, 'Código de recuperação'), code),
+      h('div', { class: 'row-gap' }, h('div', { class: 'field grow' }, h('label', {}, 'Nova senha'), p1), h('div', { class: 'field grow' }, h('label', {}, 'Confirmar'), p2)),
+      err,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: () => { close(); openAccount(); } }, 'Voltar'), go));
+    setTimeout(() => user.focus(), 0);
+  });
+}
+function openChangePassword() {
+  openModal((body, close) => {
+    const cur = h('input', { type: 'password', autocomplete: 'current-password' });
+    const p1 = h('input', { type: 'password', placeholder: 'mínimo 8 caracteres', autocomplete: 'new-password' });
+    const p2 = h('input', { type: 'password', autocomplete: 'new-password' });
+    const err = h('p', { class: 'ws-err hidden' });
+    const go = h('button', { class: 'btn-primary' }, 'Trocar senha');
+    const show = (m) => { err.textContent = m; err.classList.remove('hidden'); };
+    go.onclick = async () => {
+      if (p1.value.length < 8) return show('A nova senha precisa ter pelo menos 8 caracteres.');
+      if (p1.value !== p2.value) return show('As senhas não conferem.');
+      if (p1.value === cur.value) return show('A nova senha é igual à atual.');
+      go.disabled = true;
+      let keyBackup;
+      try { keyBackup = await window.MonoVault?.backupFor?.(p1.value); } catch { keyBackup = undefined; }
+      const r = await cloudCall('POST', '/v1/me/password', { current: cur.value, next: p1.value, ...(keyBackup !== undefined ? { keyBackup } : {}) });
+      go.disabled = false;
+      if (!r.ok) return show(r.error);
+      close();
+      toast(`Senha trocada.${r.data.signedOut ? ` ${plural(r.data.signedOut, 'outra sessão foi encerrada', 'outras sessões foram encerradas')}.` : ''}`, 4000);
+    };
+    for (const el of [cur, p1, p2]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') go.click(); });
+    body.append(h('h2', {}, 'Trocar senha'),
+      h('p', { class: 'sub' }, 'As outras sessões (outros computadores) são encerradas. Este computador continua conectado.'),
+      h('div', { class: 'field' }, h('label', {}, 'Senha atual'), cur),
+      h('div', { class: 'row-gap' }, h('div', { class: 'field grow' }, h('label', {}, 'Nova senha'), p1), h('div', { class: 'field grow' }, h('label', {}, 'Confirmar'), p2)),
+      err,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: () => { close(); openAccount(); } }, 'Cancelar'), go));
+    setTimeout(() => cur.focus(), 0);
+  });
+}
+async function newRecoveryCodes() {
+  const o = await promptModal({ title: 'Gerar novos códigos', sub: 'Os códigos antigos deixam de valer. Confirme com a sua senha.', label: 'Senha', ok: 'Gerar códigos',
+    extra: () => { setTimeout(() => { const i = $('#modalBody input'); if (i) i.type = 'password'; }, 0); return null; } });
+  if (!o) return openAccount();
+  const r = await cloudCall('POST', '/v1/me/recovery-codes', { password: o.value });
+  if (!r.ok) { toast(r.error, 3500); return openAccount(); }
+  showRecoveryCodes(r.data.recoveryCodes, { title: 'Novos códigos de recuperação', then: () => openAccount() });
+}
+function openSessions() {
+  openModal((body, close) => {
+    const list = h('div', { class: 'ws-list' }, h('p', { class: 'hint' }, 'Carregando…'));
+    const draw = async () => {
+      const r = await cloudCall('GET', '/v1/me/sessions');
+      list.innerHTML = '';
+      if (!r.ok) { list.append(h('p', { class: 'ws-err' }, r.error)); return; }
+      for (const s of r.data.sessions) {
+        list.append(h('div', { class: 'ws-row compact' },
+          h('span', { class: 'sess-ico', html: '<svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 20h8M12 17v3"/></svg>' }),
+          h('div', { class: 'ws-info' },
+            h('div', { class: 'ws-title' }, s.device, s.current ? h('span', { class: 'ws-badge' }, 'este computador') : null),
+            h('div', { class: 'ws-stats' }, `Último uso ${ago(s.lastUsedAt)} · entrou em ${new Date(s.createdAt).toLocaleDateString('pt-BR')}${s.ip ? ' · IP ' + s.ip : ''}`)),
+          s.current ? null : h('button', { class: 'btn-ghost sm', onclick: async () => { const x = await cloudCall('DELETE', `/v1/me/sessions/${s.id}`); if (!x.ok) toast(x.error, 3000); else { toast('Sessão encerrada', 1800); draw(); } } }, 'Encerrar')));
+      }
+      const others = r.data.sessions.filter((s) => !s.current).length;
+      allBtn.disabled = !others;
+    };
+    const allBtn = h('button', { class: 'btn-ghost', onclick: async () => {
+      if (!(await confirmModal({ title: 'Sair de todos os outros computadores?', sub: 'Quem estiver usando sua conta em outro lugar precisa entrar de novo.', ok: 'Sair dos outros' }))) return openSessions();
+      const x = await cloudCall('DELETE', '/v1/me/sessions');
+      toast(x.ok ? `${plural(x.data.signedOut, 'sessão encerrada', 'sessões encerradas')}` : x.error, 2600);
+      openSessions();
+    } }, 'Sair de todos os outros');
+    body.append(h('h2', {}, 'Onde você está conectado'),
+      h('p', { class: 'sub' }, 'Perdeu um notebook ou entrou num computador que não é seu? Encerre a sessão aqui — o Mono daquele computador sai da conta na hora.'),
+      list,
+      h('div', { class: 'modal-actions spread' }, allBtn, h('button', { class: 'btn-primary', onclick: () => { close(); openAccount(); } }, 'Voltar')));
+    draw();
   });
 }
 
@@ -654,7 +983,10 @@ function openShare(w) {
           h('div', { class: 'ws-info' }, h('div', { class: 'ws-title' }, '@' + i.username), h('div', { class: 'ws-stats' }, `Convite enviado (${i.role === 'viewer' ? 'só leitura' : 'pode editar'}) — aguardando aceitar`))));
       }
     };
-    shareModal = { w, draw };
+    const vaultSlot = h('div', {});
+    const drawVault = () => { vaultSlot.innerHTML = ''; vaultSlot.append(vaultSection(w)); };
+    shareModal = { w, draw: () => { draw(); drawVault(); } };
+    drawVault();
     let seq = 0;
     input.addEventListener('input', async () => {
       err.classList.add('hidden');
@@ -685,11 +1017,12 @@ function openShare(w) {
     draw();
     body.append(
       h('h2', {}, `Pessoas em “${w.name}”`),
-      h('p', { class: 'sub' }, 'Quem estiver aqui vê e edita coleções, pastas, requisições, ambientes e variáveis globais em tempo real. Valores marcados como segredo (cadeado) não são compartilhados — cada pessoa preenche os seus.'),
+      h('p', { class: 'sub' }, `Quem estiver aqui vê e edita coleções, pastas, requisições, ambientes e variáveis globais em tempo real. ${vaultOn(w) ? 'Segredos (cadeado) vão pelo cofre, cifrados de ponta a ponta.' : 'Segredos (cadeado) só são compartilhados com o cofre ligado.'}`),
       canEditWs(w) ? h('div', { class: 'invite-row' }, h('div', { class: 'at-input grow' }, h('span', {}, '@'), input, sugg), roleSel, inviteBtn)
         : h('p', { class: 'hint' }, 'Você tem acesso só de leitura: não pode convidar pessoas.'),
       err,
       list,
+      vaultSlot,
       h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: close }, 'Fechar')));
     setTimeout(() => input.focus(), 0);
     // atualiza membros e convites pendentes
@@ -726,6 +1059,7 @@ function openInvite(inv) {
       close();
       switchWorkspace(w.id, { quiet: true });
       toast(`Você entrou em “${sw.name}”`, 3000);
+      if (sw.vault && sw.vault.enabled) { w.shared.vault = sw.vault; if (myPriv()) loadVault(w); else unlockVaultPrompt(); }
     };
     body.append(
       h('h2', {}, `Convite para “${inv.wsName}”`),
@@ -1062,6 +1396,7 @@ function persist() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => api.save(stripEmpty(data)), 250);
   scheduleSync();
+  scheduleGitWrite();
   mockRefresh();
 }
 function stripEmpty(d) {
@@ -1550,7 +1885,9 @@ async function runnerExec(col, reqObj, ctx) {
   const s = scopes();
   const vars = { ...s.globals, ...s.collection, ...s.environment, ...ctx.row, ...local };
   await prepareAuth(tab, req, vars);
+  withCookies(req, vars);
   const res = await api.send(req, vars);
+  takeCookies(req, res, vars);
   rec.method = req.method; rec.url = (res.request && res.request.url) || fill(req.url, vars); rec.time = res.time ?? null;
   if (!res.ok) { rec.error = res.error; return { rec, next }; }
   Object.assign(rec, { status: res.status, statusText: res.statusText, size: res.size, contentType: res.contentType, body: res.body ? res.body.slice(0, 20000) : null, truncated: !!(res.body && res.body.length > 20000) });
@@ -1983,7 +2320,9 @@ async function send() {
   if (!(await confirmProduction([env], req))) { state.loading = false; state.scripts = prevScripts; renderResponse(); return; }
   const vars = mergedVars(env, col, local);
   await prepareAuth(tab, req, vars);
+  withCookies(req, vars);
   const res = await api.send(req, vars);
+  takeCookies(req, res, vars);
 
   // 3. Após a resposta
   const postChain = res.ok ? scriptChain(tab, req, 'tests') : [];
@@ -2419,6 +2758,303 @@ function openMonitors(w = activeWorkspace()) {
       list,
       h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: () => { monModal = null; close(); } }, 'Fechar')));
   });
+}
+
+// ---------- Busca global (Ctrl + K) ----------
+// Acha requisições, coleções, pastas, ambientes, variáveis e workspaces — inclusive de outros workspaces — e ações do app.
+function searchIndex() {
+  const out = [];
+  const norm = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  for (const w of data.workspaces) {
+    const d = wsData(w);
+    const here = w.id === data.activeWorkspaceId;
+    const wsTag = here ? '' : w.name;
+    const go = (fn) => () => { if (!here) switchWorkspace(w.id, { quiet: true }); fn(); };
+    for (const col of d.collections || []) {
+      out.push({ kind: 'col', label: col.name, sub: plural((col.requests || []).length, 'requisição', 'requisições'), ws: wsTag, hay: norm(col.name),
+        run: go(() => { const c = data.collections.find((x) => x.id === col.id); if (!c) return; c.open = true; side = 'collections'; renderSidebar(); if (c.overviewMeta || c.importReport) openOverview(c); else $('.tree-row.collection.open')?.scrollIntoView({ block: 'center' }); }) });
+      for (const f of col.folders || []) {
+        const path = [col.name, ...folderPath(col, f.id).map((x) => x.name)].join(' / ');
+        out.push({ kind: 'fold', label: f.name, sub: path, ws: wsTag, hay: norm(path),
+          run: go(() => { const c = data.collections.find((x) => x.id === col.id); if (!c) return; c.open = true; for (const x of folderPath(c, f.id)) x.open = true; side = 'collections'; renderSidebar(); }) });
+      }
+      for (const r of col.requests || []) {
+        const path = [col.name, ...folderPath(col, r.folderId).map((x) => x.name)].join(' / ');
+        out.push({ kind: 'req', method: r.method, label: r.name, sub: `${path} · ${r.url || ''}`, ws: wsTag, hay: norm(`${r.name} ${r.method} ${r.url} ${path}`),
+          run: go(() => { const c = data.collections.find((x) => x.id === col.id); const rr = c && c.requests.find((x) => x.id === r.id); if (rr) openTab(rr, { colId: c.id, reqId: rr.id }); }) });
+      }
+      for (const v of col.variables || []) if (v.key) out.push({ kind: 'var', label: `{{${v.key}}}`, sub: `variável da coleção ${col.name}${v.secret ? '' : ' · ' + String(v.value ?? '').slice(0, 60)}`, ws: wsTag, hay: norm(v.key), run: go(() => { const c = data.collections.find((x) => x.id === col.id); if (c) openCollectionVars(c); }) });
+    }
+    for (const e of d.environments || []) {
+      out.push({ kind: 'env', label: e.name, sub: e.prod ? 'ambiente · PRODUÇÃO' : 'ambiente', ws: wsTag, hay: norm(e.name), run: go(() => { data.activeEnvId = e.id; persist(); renderEnvSelect(); toast(`Ambiente: ${e.name}`, 1600); }) });
+      for (const v of e.vars || []) if (v.key) out.push({ kind: 'var', label: `{{${v.key}}}`, sub: `${e.name}${v.secret ? ' · segredo' : ' · ' + String(v.value ?? '').slice(0, 60)}`, ws: wsTag, hay: norm(v.key + ' ' + e.name), run: go(() => { data.activeEnvId = e.id; renderEnvSelect(); openEnvEditor(); }) });
+    }
+    for (const v of (d.globals || {}).vars || []) if (v.key) out.push({ kind: 'var', label: `{{${v.key}}}`, sub: `global${v.secret ? ' · segredo' : ' · ' + String(v.value ?? '').slice(0, 60)}`, ws: wsTag, hay: norm(v.key + ' global'), run: go(() => openEnvEditor()) });
+    if (!here) out.push({ kind: 'ws', label: w.name, sub: 'workspace', hay: norm(w.name + ' workspace'), run: () => switchWorkspace(w.id) });
+  }
+  const acts = [
+    ['Nova requisição', 'Ctrl + T', () => openTab(newRequest())], ['Importar API', '', () => $('#importSpecBtn').click()],
+    ['Monitores', '', () => openMonitors()], ['Histórico de alterações', '', () => openHistory()], ['Pessoas e convites', '', () => openShare(activeWorkspace())],
+    ['Ambientes', '', () => openEnvEditor()], ['Cookies', '', () => openCookies()], ['Abrir coleção de uma pasta (Git)', '', () => openGitCollection()], ['Configurações', '', () => openSettings()], ['Sua conta', '', () => openAccount()],
+  ];
+  for (const [label, sub, run] of acts) out.push({ kind: 'act', label, sub: sub || 'ação', hay: norm(label), run });
+  return { out, norm };
+}
+function searchRank(items, norm, q) {
+  const terms = norm(q).split(/\s+/).filter(Boolean);
+  if (!terms.length) return items.filter((x) => x.kind === 'act' || x.kind === 'req').slice(0, 30);
+  const scored = [];
+  for (const it of items) {
+    let score = 0, ok = true;
+    const name = norm(it.label);
+    for (const t of terms) {
+      const i = it.hay.indexOf(t);
+      if (i < 0) { ok = false; break; }
+      score += name.startsWith(t) ? 30 : name.includes(t) ? 15 : 0;
+      score += Math.max(0, 10 - i / 10);
+    }
+    if (!ok) continue;
+    score += { req: 6, act: 5, col: 4, env: 3, fold: 2, var: 1, ws: 2 }[it.kind] || 0;
+    if (it.ws) score -= 4;
+    scored.push([score, it]);
+  }
+  return scored.sort((a, b) => b[0] - a[0]).slice(0, 50).map(([, it]) => it);
+}
+function openSearch() {
+  const { out, norm } = searchIndex();
+  openModal((body, close) => {
+    body.classList.add('palette');
+    const input = h('input', { class: 'pal-input', placeholder: 'Buscar requisições, coleções, ambientes, variáveis, ações…', spellcheck: 'false' });
+    const list = h('div', { class: 'pal-list', role: 'listbox' });
+    let rows = [], sel = 0;
+    const KIND = { req: '', col: 'coleção', fold: 'pasta', env: 'ambiente', var: 'variável', ws: 'workspace', act: 'ação' };
+    const draw = () => {
+      rows = searchRank(out, norm, input.value);
+      sel = Math.min(sel, Math.max(0, rows.length - 1));
+      list.innerHTML = '';
+      if (!rows.length) list.append(h('div', { class: 'pal-empty' }, 'Nada encontrado.'));
+      rows.forEach((it, i) => list.append(h('div', { class: 'pal-row' + (i === sel ? ' on' : ''), role: 'option', onmousemove: () => { if (sel !== i) { sel = i; mark(); } }, onclick: () => pick(i) },
+        it.kind === 'req' ? h('span', { class: 'm ' + methodClass(it.method) }, it.method) : h('span', { class: 'pal-kind' }, KIND[it.kind]),
+        h('span', { class: 'pal-label' }, it.label),
+        h('span', { class: 'pal-sub' }, it.sub),
+        it.ws ? h('span', { class: 'tag' }, it.ws) : null)));
+    };
+    const mark = () => [...list.children].forEach((c, i) => c.classList.toggle('on', i === sel));
+    const pick = (i) => { const it = rows[i]; if (!it) return; close(); it.run(); };
+    input.addEventListener('input', () => { sel = 0; draw(); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'ArrowDown') { e.preventDefault(); sel = Math.min(rows.length - 1, sel + 1); mark(); list.children[sel]?.scrollIntoView({ block: 'nearest' }); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); sel = Math.max(0, sel - 1); mark(); list.children[sel]?.scrollIntoView({ block: 'nearest' }); }
+      else if (e.key === 'Enter') { e.preventDefault(); pick(sel); }
+    });
+    body.append(input, list, h('div', { class: 'pal-foot' }, h('span', {}, '↑↓ navegar'), h('span', {}, 'Enter abrir'), h('span', {}, 'Esc fechar')));
+    draw();
+    setTimeout(() => input.focus(), 0);
+  });
+}
+
+// ---------- Testes gerados a partir da resposta ----------
+async function openTestgen(tab, res, useAi) {
+  const TG = window.MonoTestgen;
+  let code = TG.generate(res);
+  let source = 'Testes básicos (status, tempo, Content-Type, campos e tipos)';
+  if (useAi) {
+    if (!aiReady()) { toast('Configure a IA em Configurações › IA para gerar testes com IA.', 3500); openSettings('ai'); return; }
+    toast(`Pedindo testes ao ${aiName()}…`, 2500);
+    try {
+      const ai = settings().ai;
+      const openai = ai.provider === 'openai';
+      const r = await api.ai({ provider: openai ? 'openai' : 'anthropic', apiKey: aiKeyOf(ai), model: openai ? ai.openaiModel : ai.model, system: TG.AI_SYSTEM, prompt: TG.aiPrompt(tab.draft, res), maxTokens: 4000 });
+      if (!r.ok) throw new Error(r.error);
+      code = TG.cleanCode(r.text);
+      source = `Gerado pelo ${aiName()} — revise antes de adicionar`;
+    } catch (e) { toast('A IA não respondeu: ' + e.message + '. Mostrando os testes básicos.', 4500); }
+  }
+  openModal((body, close) => {
+    body.classList.add('wide');
+    const ed = window.MonoScripts.codeEditor({ value: code, label: 'Testes', complete: true, onChange: (v) => { code = v; } });
+    const add = (run) => {
+      const r = tab.draft;
+      r.tests = (String(r.tests || '').trim() ? r.tests.replace(/\s*$/, '\n\n') : '') + code;
+      if (activeTab() === tab) { markDirty(); scriptWhich = 'post'; reqTab = 'scripts'; renderRequest(); } else tab.dirty = true;
+      close();
+      toast('Testes adicionados em Scripts › Após a resposta. Salve a requisição (Ctrl + S) para manter.', 3500);
+      if (run && activeTab() === tab) send();
+    };
+    body.append(h('h2', {}, 'Gerar testes'), h('p', { class: 'sub' }, source),
+      h('div', { class: 'body-code tg-code' }, ed),
+      h('div', { class: 'modal-actions spread' },
+        useAi ? h('button', { class: 'btn-text sm', onclick: () => { close(); openTestgen(tab, res, false); } }, 'Ver os básicos') : (aiReady() ? h('button', { class: 'btn-text sm', onclick: () => { close(); openTestgen(tab, res, true); } }, `Melhorar com ${aiName()}`) : h('span', {})),
+        h('div', { class: 'row-gap' }, h('button', { class: 'btn-ghost', onclick: close }, 'Cancelar'), h('button', { class: 'btn-ghost', onclick: () => add(false) }, 'Adicionar'), h('button', { class: 'btn-primary', onclick: () => add(true) }, 'Adicionar e rodar'))));
+  });
+}
+
+// ---------- Cookies ----------
+// Pote de cookies por workspace (só neste computador): guarda o Set-Cookie das respostas e manda o Cookie nas próximas.
+const cookieOn = () => settings().cookieJar !== false;
+const absUrl = (u) => (/^[a-z][a-z0-9+.-]*:\/\//i.test(u) ? u : 'http://' + u);
+function withCookies(req, vars) {
+  if (!cookieOn() || kindOf(req) !== 'http') return;
+  if ((req.headers || []).some((x) => x.enabled !== false && /^cookie$/i.test(x.key || ''))) return; // header manual vence
+  const value = window.MonoCookies.headerFor(data.cookies || [], absUrl(fill(req.url, vars)));
+  if (value) req.headers = [...(req.headers || []), { key: 'Cookie', value, enabled: true }];
+}
+function takeCookies(req, res, vars) {
+  if (!cookieOn() || !res || !res.ok) return 0;
+  const sc = window.MonoCookies.setCookiesOf(res.headers);
+  if (!sc.length) return 0;
+  data.cookies ||= [];
+  const n = window.MonoCookies.store(data.cookies, res.url || (res.request && res.request.url) || absUrl(fill(req.url, vars)), sc);
+  if (n) persist();
+  return n;
+}
+function openCookies(focusDomain = null) {
+  openModal((body, close) => {
+    body.classList.add('wide');
+    const list = h('div', { class: 'ck-list' });
+    const filter = h('input', { class: 'live-filter', placeholder: 'Filtrar por domínio ou nome', value: focusDomain || '' });
+    const toggle = h('input', { type: 'checkbox', checked: cookieOn(), onchange: (e) => { settings().cookieJar = e.target.checked; persist(); } });
+    const draw = () => {
+      window.MonoCookies.purge(data.cookies ||= []);
+      list.innerHTML = '';
+      const q = filter.value.trim().toLowerCase();
+      const byDomain = new Map();
+      for (const c of data.cookies) if (!q || c.domain.includes(q) || c.name.toLowerCase().includes(q)) byDomain.set(c.domain, [...(byDomain.get(c.domain) || []), c]);
+      if (!byDomain.size) list.append(h('div', { class: 'ex-empty' }, h('b', {}, data.cookies.length ? 'Nada com esse filtro' : 'Nenhum cookie guardado'), 'Quando uma resposta mandar Set-Cookie, o cookie aparece aqui e vai nas próximas requisições para o mesmo domínio.'));
+      for (const [domain, cs] of [...byDomain].sort()) {
+        const rows = h('table', { class: 'data-table ck-table' }, h('tr', {}, ['Nome', 'Valor', 'Caminho', 'Expira', ''].map((t) => h('th', {}, t))));
+        for (const c of cs) {
+          const val = h('input', { value: c.value, spellcheck: 'false', class: 'ck-val' });
+          val.addEventListener('change', () => { c.value = val.value; persist(); toast('Cookie atualizado', 1200); });
+          rows.append(h('tr', {},
+            h('td', { class: 'mono-cell' }, c.name, c.httpOnly ? h('span', { class: 'tag', title: 'HttpOnly' }, 'HTTP') : null, c.secure ? h('span', { class: 'tag', title: 'Só em HTTPS' }, 'SEC') : null),
+            h('td', {}, val),
+            h('td', { class: 'mono-cell' }, c.path),
+            h('td', { class: 'muted small' }, c.expires ? new Date(c.expires).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'sessão'),
+            h('td', {}, h('button', { class: 'del', title: 'Apagar', html: icons.x, onclick: () => { data.cookies.splice(data.cookies.indexOf(c), 1); persist(); draw(); } }))));
+        }
+        list.append(h('div', { class: 'ck-domain' },
+          h('div', { class: 'ck-head' }, h('b', {}, domain), h('span', { class: 'muted small' }, plural(cs.length, 'cookie', 'cookies')), h('div', { class: 'grow' }),
+            h('button', { class: 'btn-text sm', onclick: () => { data.cookies = data.cookies.filter((x) => x.domain !== domain); persist(); draw(); } }, 'Apagar domínio')),
+          rows));
+      }
+    };
+    filter.addEventListener('input', draw);
+    const add = async () => {
+      const o = await promptModal({ title: 'Novo cookie', sub: 'Formato do Set-Cookie: nome=valor; Path=/; Domain=api.exemplo.com', label: 'Cookie', ok: 'Adicionar',
+        extra: () => { const urlIn = h('input', { placeholder: 'https://api.exemplo.com', value: focusDomain ? 'https://' + focusDomain : '' }); const el = h('div', { class: 'field' }, h('label', {}, 'Para a URL'), urlIn); el.getValue = () => urlIn.value.trim(); return el; } });
+      if (o && o.extra) { data.cookies ||= []; if (!window.MonoCookies.store(data.cookies, absUrl(o.extra), [o.value])) toast('Cookie inválido para essa URL.', 2600); persist(); }
+      openCookies(focusDomain);
+    };
+    body.append(h('div', { class: 'ws-head' },
+      h('div', {}, h('h2', {}, 'Cookies'), h('p', { class: 'sub' }, 'Guardados por workspace, só neste computador. Um header Cookie escrito na requisição tem prioridade.')),
+      h('button', { class: 'btn-ghost', onclick: () => { close(); add(); } }, '+ Cookie')),
+      h('div', { class: 'row-gap ck-tools' }, filter, h('label', { class: 'check-row', style: 'margin:0' }, toggle, h('span', {}, 'Guardar e enviar cookies automaticamente')), h('div', { class: 'grow' }),
+        h('button', { class: 'btn-text sm', onclick: async () => { if (await confirmModal({ title: 'Apagar todos os cookies?', sub: 'De todos os domínios deste workspace.', ok: 'Apagar tudo' })) { data.cookies = []; persist(); } openCookies(); } }, 'Apagar tudo')),
+      list,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: close }, 'Fechar')));
+    draw();
+  });
+}
+
+// ---------- Coleções como arquivos (Git) ----------
+// Uma coleção vinculada a uma pasta é gravada como um arquivo por requisição a cada mudança; quando os arquivos
+// mudam por fora (git pull, troca de branch), a coleção é recarregada. O caminho da pasta é só deste computador.
+const GF = window.MonoGitfs;
+const samePath = (a, b) => String(a || '').replace(/[\\/]+$/, '').toLowerCase() === String(b || '').replace(/[\\/]+$/, '').toLowerCase();
+let gitTimer = null;
+const gitWarned = new Set();
+function scheduleGitWrite() { if (!api.git || !data) return; clearTimeout(gitTimer); gitTimer = setTimeout(gitFlush, 700); }
+async function gitFlush() {
+  for (const col of data.collections || []) {
+    if (!col.gitDir) continue;
+    const fp = GF.fingerprint(col);
+    if (col.gitPrint === fp) continue;
+    try { await api.git.write({ dir: col.gitDir, files: GF.toFiles(col) }); col.gitPrint = fp; gitWarned.delete(col.id); persist(); }
+    catch (e) {
+      if (!gitWarned.has(col.id)) { gitWarned.add(col.id); toast(`Não consegui gravar “${col.name}” na pasta: ${String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}`, 6000); }
+    }
+  }
+}
+// Troca o conteúdo da coleção pelo que veio da pasta (mantém id, árvore aberta e o vínculo).
+function adoptFromFiles(col, files) {
+  const nc = GF.fromFiles(files);
+  const keep = { id: col.id, open: col.open, gitDir: col.gitDir };
+  for (const k of Object.keys(col)) delete col[k];
+  Object.assign(col, nc, keep);
+  col.gitPrint = GF.fingerprint(col);
+  for (const t of session().tabs) { const f = findRef(t.ref); if (!f && t.ref && t.ref.colId === col.id) { t.ref = null; t.dirty = true; } else if (f && !t.dirty) t.draft = clone(f.req); }
+  persist(); renderSidebar(); renderTabs(); if (!activeTab()?.dirty) renderRequest();
+}
+const gitMsg = (e) => String(e && e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+async function gitReload(col, { quiet = false } = {}) {
+  try {
+    const r = await api.git.read({ dir: col.gitDir });
+    const metaOk = r.files.some((f) => f.path === GF.META);
+    if (!metaOk) { if (!quiet) toast('A pasta não tem a coleção (mono.collection.json). Vou gravar a do Mono.', 3500); col.gitPrint = null; scheduleGitWrite(); return false; }
+    const probe = GF.fromFiles(r.files);
+    const fpFolder = GF.fingerprint({ ...probe, id: col.id });
+    if (fpFolder === GF.fingerprint(col)) { col.gitPrint = fpFolder; return false; }
+    adoptFromFiles(col, r.files);
+    toast(`“${col.name}” atualizada a partir da pasta (git pull?)`, 3500);
+    return true;
+  } catch (e) { if (!quiet) toast(gitMsg(e), 5000); return false; }
+}
+async function linkGit(col) {
+  if (!api.git) return toast('Disponível no app instalado.', 2500);
+  const p = await api.git.pickDir({ title: `Pasta para a coleção “${col.name}” (dentro do seu repositório)` });
+  if (!p || !p.ok) return;
+  let existing = [];
+  try { existing = (await api.git.read({ dir: p.path })).files; } catch (e) { return toast(gitMsg(e), 4000); }
+  const hasCol = existing.some((f) => f.path === GF.META);
+  const finish = async (load) => {
+    col.gitDir = p.path; col.gitPrint = null;
+    if (load) { try { adoptFromFiles(col, existing); } catch (e) { col.gitDir = null; return toast(gitMsg(e), 5000); } }
+    persist(); await gitFlush(); api.git.watch({ dir: p.path }).catch(() => {});
+    renderSidebar();
+    toast(load ? `Coleção carregada da pasta e vinculada` : `“${col.name}” agora é gravada em ${p.path} — faça commit pelo Git`, 4500);
+  };
+  if (!hasCol) return finish(false);
+  openModal((body, close) => {
+    body.append(h('h2', {}, 'A pasta já tem uma coleção'),
+      h('p', { class: 'sub' }, `Encontrei ${plural(existing.filter((f) => f.path.endsWith('.req.json')).length, 'requisição', 'requisições')} em ${p.path}. O que fazer?`),
+      h('div', { class: 'modal-actions spread' }, h('button', { class: 'btn-ghost', onclick: close }, 'Cancelar'),
+        h('div', { class: 'row-gap' },
+          h('button', { class: 'btn-ghost', onclick: () => { close(); finish(false); } }, 'Sobrescrever com a do Mono'),
+          h('button', { class: 'btn-primary', onclick: () => { close(); finish(true); } }, 'Carregar da pasta'))));
+  });
+}
+async function openGitCollection() {
+  if (!api.git) return toast('Disponível no app instalado.', 2500);
+  const p = await api.git.pickDir({ title: 'Pasta com a coleção do Mono (mono.collection.json)' });
+  if (!p || !p.ok) return;
+  try {
+    const files = (await api.git.read({ dir: p.path })).files;
+    if (!files.some((f) => f.path === GF.META)) return toast('Essa pasta não tem uma coleção do Mono (mono.collection.json).', 4000);
+    const nc = GF.fromFiles(files);
+    if (data.collections.some((c) => c.id === nc.id)) nc.id = uid('col');
+    const col = { ...nc, open: true, gitDir: p.path };
+    col.gitPrint = GF.fingerprint(col);
+    data.collections.push(col);
+    persist(); renderSidebar(); api.git.watch({ dir: p.path }).catch(() => {});
+    toast(`“${col.name}” aberta da pasta, com ${plural(col.requests.length, 'requisição', 'requisições')}`, 3500);
+  } catch (e) { toast(gitMsg(e), 5000); }
+}
+function unlinkGit(col) { const d = col.gitDir; delete col.gitDir; delete col.gitPrint; persist(); renderSidebar(); if (d && !data.collections.some((c) => samePath(c.gitDir, d))) api.git.unwatch({ dir: d }).catch(() => {}); toast('Desvinculada. Os arquivos continuam na pasta.', 2800); }
+function gitInit() {
+  if (!api.git) return;
+  api.git.onChanged(({ dir }) => { for (const col of data.collections || []) if (col.gitDir && samePath(col.gitDir, dir)) gitReload(col, { quiet: true }); });
+  for (const col of data.collections || []) if (col.gitDir) { api.git.watch({ dir: col.gitDir }).catch(() => {}); gitStartupSync(col); }
+}
+// Ao abrir o Mono: se a pasta mudou enquanto o app estava fechado, ela vence; senão, grava o que mudou aqui.
+async function gitStartupSync(col) {
+  try {
+    const files = (await api.git.read({ dir: col.gitDir })).files;
+    if (!files.some((f) => f.path === GF.META)) { col.gitPrint = null; return scheduleGitWrite(); }
+    const fpFolder = GF.fingerprint({ ...GF.fromFiles(files), id: col.id });
+    if (col.gitPrint && fpFolder !== col.gitPrint) { adoptFromFiles(col, files); toast(`“${col.name}” atualizada a partir da pasta`, 3000); }
+    else scheduleGitWrite();
+  } catch (e) { toast(`Pasta de “${col.name}”: ${gitMsg(e)}`, 5000); }
 }
 
 // ---------- Comparar ambientes ----------
@@ -3261,12 +3897,17 @@ function renderResponse() {
     h('nav', { class: 'subtabs' }, tabs.map(([k, label]) => h('button', { class: resTab === k ? 'active' : '', onclick: () => { resTab = k; renderResponse(); } }, label))),
     h('div', { class: 'res-tools' },
       res.example == null && res.body != null && !state.compare ? h('button', { class: 'btn-ghost sm', title: 'Guardar esta resposta na requisição (documentação e mock server)', onclick: () => saveExample(tab, res) }, 'Salvar como exemplo') : null,
+      res.example == null && !state.compare ? h('button', { class: 'btn-ghost sm', title: 'Criar pm.test a partir desta resposta', onclick: (e) => showMenu(e.currentTarget, [
+        { label: 'Testes básicos (status, campos, tipos)', run: () => openTestgen(tab, res, false) },
+        { label: aiReady() ? `Com IA (${aiName()})` : 'Com IA — configurar…', run: () => openTestgen(tab, res, true) },
+      ]) }, 'Gerar testes ▾') : null,
       resTab === 'preview' && isHtml ? h('span', { class: 'muted small', title: 'Scripts e formulários da página ficam bloqueados no preview' }, 'Scripts desativados') : null,
       null),
     h('div', { class: 'metrics' },
       h('span', { class: `status s${String(res.status)[0]}` }, `${res.status} ${res.statusText || ''}`.trim()),
       res.example != null ? h('span', { class: 'flag', title: 'Exemplo salvo — não é uma resposta ao vivo' }, 'Exemplo · ' + res.example) : h('span', {}, 'Tempo ', h('b', {}, fmtTime(res.time))),
       h('span', {}, 'Tamanho ', h('b', {}, fmtBytes(res.size))),
+      window.MonoCookies.setCookiesOf(res.headers).length ? h('button', { class: 'flag', title: 'Esta resposta mandou cookies — guardados para as próximas requisições', onclick: () => { let host = ''; try { host = new URL(res.url || (res.request && res.request.url)).hostname; } catch { /* sem url */ } openCookies(host); } }, `Cookies ${window.MonoCookies.setCookiesOf(res.headers).length}`) : null,
       ch && ch.list.length ? h('button', { class: 'flag warn', title: 'A estrutura do JSON mudou desde a última resposta', onclick: () => { resTab = 'changes'; renderResponse(); } }, `${ch.list.length} mudança${ch.list.length > 1 ? 's' : ''}`) : null,
       ct ? h('button', { class: 'flag ' + (ct.status === 'ok' ? 'ok' : 'warn'), title: ct.message, onclick: () => { resTab = 'contract'; renderResponse(); } },
         ct.status === 'ok' ? 'Contrato ✓' : ct.status === 'undocumented' ? 'Status não documentado' : `Contrato · ${ct.issues.filter((i) => i.level === 'erro').length || '!'}`) : null));
@@ -3739,6 +4380,11 @@ function renderSidebarCore() {
         { label: 'Executar coleção…', run: () => openRunner(col, null) },
         { label: 'Monitorar…', run: () => openMonitorForm(activeWorkspace(), null, { colId: col.id, name: col.name }) },
         { label: 'Mock server…', run: () => openMock(col) },
+        ...(col.gitDir ? [
+          { label: 'Pasta Git: abrir no Explorer', run: () => api.revealFile(col.gitDir) },
+          { label: 'Recarregar da pasta', run: () => gitReload(col).then((ch) => { if (!ch) toast('A coleção já está igual à pasta.', 2000); }) },
+          { label: 'Desvincular da pasta', run: () => unlinkGit(col) },
+        ] : [{ label: 'Salvar como arquivos (Git)…', run: () => linkGit(col) }]),
         '-',
         { label: 'Nova requisição', run: () => newRequestIn(col, null) },
         { label: 'Nova pasta', run: () => newFolder(col, null) },
@@ -3756,6 +4402,7 @@ function renderSidebarCore() {
       const head = h('div', { class: 'tree-row collection' + (open ? ' open' : ''), style: '--depth:0', onclick: () => { col.open = !col.open; persist(); renderSidebar(); }, html: icons.chev },
         h('span', { class: 'name' }, col.name), ovBtn,
         col.spec ? h('span', { class: 'tag', title: 'Coleção com contrato OpenAPI — respostas são validadas' }, 'API') : null,
+        col.gitDir ? h('span', { class: 'tag git-tag', title: `Gravada como arquivos em ${col.gitDir}` }, 'GIT') : null,
         mockState.running && mockState.colId === col.id ? h('button', { class: 'tag mock-tag', title: `Mock server rodando em ${mockState.url}`, onclick: (e) => { e.stopPropagation(); openMock(col); } }, 'MOCK') : null,
         h('span', { class: 'n' }, col.requests.length), more);
       dropTarget(head, col, null);
@@ -4170,6 +4817,7 @@ function bind() {
   });
   $('#sendBtn').addEventListener('click', send);
   $('#wsBtn').addEventListener('click', (e) => openWorkspaceMenu(e.currentTarget));
+  $('#searchBtn').addEventListener('click', openSearch);
   initVarFields();
   initUpdates();
   $('#saveBtn').addEventListener('click', saveActive);
@@ -4200,6 +4848,7 @@ function bind() {
   });
   document.addEventListener('keydown', (e) => {
     const mod = e.ctrlKey || e.metaKey;
+    if (mod && !e.altKey && (e.key === 'k' || e.key === 'K' || e.key === 'p' || e.key === 'P')) { e.preventDefault(); if ($('#modal').classList.contains('hidden') || !$('#modalBody').classList.contains('palette')) openSearch(); return; }
     if (!mod || !$('#modal').classList.contains('hidden')) return;
     const k = e.key.toLowerCase();
     if (e.altKey && k === 'l') { e.preventDefault(); toggleLayout(); }
@@ -4306,6 +4955,7 @@ function initVarFields() {
   cloudInit();
   liveInit();
   setInterval(monitorTick, 30000); setTimeout(monitorTick, 8000);
+  gitInit();
   $('#monAlert').addEventListener('click', () => openMonitors());
   renderMonAlert();
   mockInit();

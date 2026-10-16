@@ -727,3 +727,51 @@ body.is-prod .env { border-color: var(--danger); }
 .swatch { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; padding: 0; box-shadow: inset 0 0 0 1px rgba(0,0,0,.15); }
 .swatch:hover { transform: scale(1.08); }
 .swatch.on { border-color: var(--text); }
+
+/* Segurança da conta */
+.rec-codes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; padding: 14px 16px; margin: 4px 0 12px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); }
+.rec-codes code { font: 14px/1.6 var(--font-mono); letter-spacing: .06em; color: var(--text); }
+.sec-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.sec-actions .warn { border-color: var(--warning, #d29922); color: var(--warning, #d29922); }
+.sess-ico { width: 30px; height: 30px; display: grid; place-items: center; flex: none; color: var(--text-2); }
+.sess-ico svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.mono-input { font-family: var(--font-mono); letter-spacing: .05em; }
+
+/* Cofre de segredos */
+.vault-box { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 12px; border: 1px dashed var(--border-strong); border-radius: var(--r-lg); }
+.vault-box.on { border-style: solid; border-color: var(--success); background: var(--success-bg); }
+.vault-ico { width: 30px; height: 30px; display: grid; place-items: center; flex: none; color: var(--text-2); }
+.vault-box.on .vault-ico { color: var(--success); }
+.vault-ico svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+
+/* Busca global */
+.search-btn { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: var(--r-md); padding: 4px 6px 4px 10px; min-width: 210px; }
+.search-btn:hover { color: var(--text-2); border-color: var(--border-strong); }
+.search-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.search-btn span { flex: 1; text-align: left; font-size: var(--fs-sm); }
+.search-btn kbd { font: 10.5px/1 var(--font-mono); padding: 3px 5px; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); }
+.modal.palette { width: min(720px, 92vw); padding: 0; align-self: start; margin-top: 12vh; overflow: hidden; display: flex; flex-direction: column; max-height: 70vh; }
+.pal-input { border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--text); padding: 16px 18px; font-size: 16px; outline: none; }
+.pal-list { overflow: auto; padding: 6px; }
+.pal-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--r-md); cursor: pointer; min-width: 0; }
+.pal-row.on { background: var(--hover); }
+.pal-row .m { width: 52px; }
+.pal-kind { width: 52px; flex: none; font-size: 10px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+.pal-label { color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+.pal-sub { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0; }
+.pal-empty { padding: 24px; text-align: center; color: var(--muted); }
+.pal-foot { display: flex; gap: 16px; padding: 8px 18px; border-top: 1px solid var(--border); color: var(--muted); font-size: var(--fs-xs); }
+.tg-code .code-editor { min-height: 320px; }
+
+/* Cookies */
+.ck-tools { align-items: center; margin-bottom: 10px; }
+.ck-domain { border: 1px solid var(--border); border-radius: var(--r-lg); margin-bottom: 8px; overflow: hidden; }
+.ck-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.ck-table { width: 100%; }
+.ck-table td, .ck-table th { padding: 6px 10px; }
+.ck-table .tag { margin-left: 6px; }
+.ck-val { width: 100%; border: 1px solid transparent; background: transparent; color: var(--text); font-family: var(--font-mono); font-size: 12.5px; padding: 3px 6px; border-radius: var(--r-sm); }
+.ck-val:hover, .ck-val:focus { border-color: var(--border); background: var(--surface); outline: none; }
+.ck-table .del { border: 0; background: transparent; color: var(--muted); width: 22px; height: 22px; display: grid; place-items: center; }
+.ck-table .del svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 2; }
+.git-tag { color: var(--syn-string); border-color: currentColor; margin-left: 6px; }

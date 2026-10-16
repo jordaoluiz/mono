@@ -24,6 +24,7 @@
         <div class="ws-presence hidden" id="wsPresence"></div>
       </div>
       <div class="topbar-right">
+        <button class="search-btn" id="searchBtn" title="Buscar em tudo (Ctrl + K)"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/></svg><span>Buscar</span><kbd>Ctrl K</kbd></button>
         <button class="mon-alert hidden" id="monAlert" title="Monitores com falha"></button>
         <div class="env">
           <label for="envSelect" class="muted small">Ambiente</label>
@@ -126,6 +127,10 @@
   <script src="../shared/wsdl.js"></script>
   <script src="../shared/sync.js"></script>
   <script src="../shared/graphql.js"></script>
+  <script src="../shared/vaultcrypto.js"></script>
+  <script src="../shared/testgen.js"></script>
+  <script src="../shared/cookies.js"></script>
+  <script src="../shared/gitfs.js"></script>
   <script src="../shared/mockroutes.js"></script>
   <script src="ui.js"></script>
   <script src="script-editor.js"></script>

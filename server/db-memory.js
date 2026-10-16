@@ -27,6 +27,10 @@ function createMemoryDb() {
     async createSession(s) { sessions.set(s.tokenHash, clone(s)); },
     async sessionByHash(h) { const s = sessions.get(h); return s && new Date(s.expiresAt) > new Date() ? clone(s) : null; },
     async deleteSession(h) { sessions.delete(h); },
+    async listSessions(userId) { return [...sessions.values()].filter((s) => s.userId === userId && new Date(s.expiresAt) > new Date()).map(clone); },
+    async deleteSessionById(userId, id) { for (const [h, s] of sessions) if (s.userId === userId && s.id === id) { sessions.delete(h); return h; } return null; },
+    async deleteSessionsOfUser(userId, exceptHash = null) { const out = []; for (const [h, s] of sessions) if (s.userId === userId && h !== exceptHash) { sessions.delete(h); out.push(h); } return out; },
+    async touchSession(h, at) { const s = sessions.get(h); if (s) s.lastUsedAt = at; },
     // workspaces
     async createWorkspace(w) { workspaces.set(w.id, clone(w)); },
     async getWorkspace(id) { return clone(workspaces.get(id) || null); },

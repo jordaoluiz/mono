@@ -31,12 +31,16 @@ async function checkPassword(pw, stored) {
 }
 const DUMMY_HASH = 'scrypt$16384$8$1$AAAAAAAAAAAAAAAAAAAAAA==$' + Buffer.alloc(64).toString('base64');
 
-const publicUser = (u) => ({ id: u.id, username: u.username, name: u.name || '', color: u.color || '', avatar: u.avatar || '' });
+const publicUser = (u) => ({ id: u.id, username: u.username, name: u.name || '', color: u.color || '', avatar: u.avatar || '', publicKey: u.publicKey || '' });
 // Avatar: imagem pequena (o app recorta e reduz para 128×128) guardada como data URL; ou só a cor da inicial.
 const AVATAR_RE = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/;
 const MAX_AVATAR = 90 * 1024;
 const COLOR_RE = /^#[0-9a-fA-F]{6}$/;
-const summary = (w) => ({ id: w.id, name: w.name, description: w.description || '', ownerId: w.ownerId, members: w.members, version: w.version, updatedAt: w.updatedAt });
+// Cofre: o servidor só guarda material cifrado (chave pública, backup da chave privada cifrado com a senha, chaves embrulhadas).
+const B64_RE = /^[A-Za-z0-9+/=_-]+$/;
+const okB64 = (s, max) => typeof s === 'string' && s.length > 0 && s.length <= max && B64_RE.test(s);
+const okBlob = (b, fields, max = 2000) => b && typeof b === 'object' && !Array.isArray(b) && fields.every((f) => okB64(b[f], max)) && Object.keys(b).length <= fields.length + 3;
+const summary = (w) => ({ id: w.id, name: w.name, description: w.description || '', ownerId: w.ownerId, members: w.members, version: w.version, updatedAt: w.updatedAt, vault: w.vault && w.vault.enabled ? { enabled: true, kid: w.vault.kid } : { enabled: false } });
 
 function createApp({ db, log = () => {}, now = () => new Date() }) {
   // ---------- tempo real ----------
@@ -70,21 +74,42 @@ function createApp({ db, log = () => {}, now = () => new Date() }) {
     return run;
   }
 
-  async function newSession(user) {
+  const deviceOf = (req) => String(req.headers['x-mono-device'] || 'Mono').replace(/[\u0000-\u001f]/g, '').slice(0, 120);
+  async function newSession(user, req, ip) {
     const token = 'mono_' + crypto.randomBytes(32).toString('base64url');
-    const created = now();
-    await db.createSession({ tokenHash: sha(token), userId: user.id, createdAt: created.toISOString(), expiresAt: new Date(created.getTime() + SESSION_DAYS * 864e5).toISOString() });
+    const created = now().toISOString();
+    await db.createSession({ id: rid('ses_'), tokenHash: sha(token), userId: user.id, device: deviceOf(req), ip: String(ip || '').slice(0, 64), createdAt: created, lastUsedAt: created, expiresAt: new Date(now().getTime() + SESSION_DAYS * 864e5).toISOString() });
     return { token, user: publicUser(user) };
   }
   async function auth(req) {
     const m = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization || '');
     if (!m) fail(401, 'Entre na sua conta do Mono.');
-    const s = await db.sessionByHash(sha(m[1]));
+    const hash = sha(m[1]);
+    const s = await db.sessionByHash(hash);
     if (!s) fail(401, 'Sessão expirada. Entre de novo.');
     const u = await db.userById(s.userId);
     if (!u) fail(401, 'Conta não encontrada.');
-    return { user: u, tokenHash: sha(m[1]) };
+    if (!s.lastUsedAt || now() - new Date(s.lastUsedAt) > 10 * 60000) db.touchSession(hash, now().toISOString()).catch(() => {});
+    return { user: u, tokenHash: hash, session: s };
   }
+  // Derruba na hora as conexões em tempo real das sessões encerradas (o app recebe 401 e sai da conta).
+  function kickSessions(userId, hashes) {
+    const set = streams.get(userId);
+    if (!set) return;
+    for (const s of [...set]) if (hashes.includes(s.tokenHash)) { s.res.write('event: logout\ndata: {}\n\n'); s.res.end(); set.delete(s); }
+  }
+  // Códigos de recuperação: 10 códigos de uso único (só o hash fica no banco).
+  const CODE_ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const normCode = (c) => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  function newRecoveryCodes() {
+    const codes = Array.from({ length: 10 }, () => {
+      const b = crypto.randomBytes(12);
+      const s = [...b].map((x) => CODE_ABC[x % CODE_ABC.length]).join('');
+      return `${s.slice(0, 4)}-${s.slice(4, 8)}-${s.slice(8, 12)}`;
+    });
+    return { codes, stored: codes.map((c) => ({ h: sha('mono-rec:' + normCode(c)), usedAt: null })) };
+  }
+  const recoveryLeft = (u) => (u.recovery || []).filter((r) => !r.usedAt).length;
   async function memberWs(id, user) {
     const w = await db.getWorkspace(id);
     if (!w || !w.members.some((m) => m.userId === user.id)) fail(404, 'Workspace não encontrado ou você não faz mais parte dele.');
@@ -154,7 +179,7 @@ function createApp({ db, log = () => {}, now = () => new Date() }) {
 
   route('GET', '/health', async () => ({ ok: true, db: db.kind }), { open: true });
 
-  route('POST', '/v1/register', async ({ body, ip }) => {
+  route('POST', '/v1/register', async ({ req, body, ip }) => {
     limit(ip);
     const username = Sync.normUser(body.username);
     if (!Sync.USERNAME.test(username)) fail(400, 'O @ precisa ter de 3 a 30 caracteres: letras minúsculas, números, ponto ou _ (sem começar ou terminar com ponto ou _).');
@@ -166,26 +191,88 @@ function createApp({ db, log = () => {}, now = () => new Date() }) {
     try { await db.createUser(user); }
     catch (e) { if (e.code === 'DUP') fail(409, `O @${username} já está em uso. Escolha outro.`); throw e; }
     log(`cadastro @${username}`);
-    return newSession(user);
+    const rec = newRecoveryCodes();
+    await db.updateUser(user.id, { recovery: rec.stored });
+    return { ...(await newSession(user, req, ip)), recoveryCodes: rec.codes };
   }, { open: true });
 
-  route('POST', '/v1/login', async ({ body, ip }) => {
+  route('POST', '/v1/login', async ({ req, body, ip }) => {
     limit(ip);
     const username = Sync.normUser(body.username);
     const u = Sync.USERNAME.test(username) ? await db.userByName(username) : null;
     const ok = await checkPassword(String(body.password || ''), u ? u.passHash : DUMMY_HASH);
     if (!u || !ok) fail(401, '@ ou senha incorretos.');
-    return newSession(u);
+    return newSession(u, req, ip);
   }, { open: true });
 
   route('POST', '/v1/logout', async ({ me }) => { await db.deleteSession(me.tokenHash); return { ok: true }; });
-  route('GET', '/v1/me', async ({ me }) => ({ user: publicUser(me.user) }));
+  route('GET', '/v1/me', async ({ me }) => ({ user: publicUser(me.user), recoveryLeft: recoveryLeft(me.user), keyBackup: me.user.keyBackup || null }));
+
+  // Trocar senha: confere a atual e encerra as outras sessões.
+  route('POST', '/v1/me/password', async ({ body, me, ip }) => {
+    limit('pw:' + ip);
+    if (!(await checkPassword(String(body.current || ''), me.user.passHash))) fail(401, 'Senha atual incorreta.');
+    const next = String(body.next || '');
+    if (next.length < 8) fail(400, 'A nova senha precisa ter pelo menos 8 caracteres.');
+    if (next.length > 200) fail(400, 'Senha longa demais.');
+    const fields = { passHash: await hashPassword(next) };
+    if (body.keyBackup !== undefined) { if (body.keyBackup && !okBlob(body.keyBackup, ['salt', 'iv', 'ct'])) fail(400, 'Backup de chave inválido.'); fields.keyBackup = body.keyBackup || null; }
+    await db.updateUser(me.user.id, fields);
+    const gone = await db.deleteSessionsOfUser(me.user.id, me.tokenHash);
+    kickSessions(me.user.id, gone);
+    return { ok: true, signedOut: gone.length };
+  });
+  // Novos códigos de recuperação (os antigos deixam de valer).
+  route('POST', '/v1/me/recovery-codes', async ({ body, me, ip }) => {
+    limit('pw:' + ip);
+    if (!(await checkPassword(String(body.password || ''), me.user.passHash))) fail(401, 'Senha incorreta.');
+    const rec = newRecoveryCodes();
+    await db.updateUser(me.user.id, { recovery: rec.stored });
+    return { recoveryCodes: rec.codes };
+  });
+  // Esqueci a senha: @ + um código de recuperação + nova senha. Encerra todas as sessões.
+  route('POST', '/v1/recover', async ({ req, body, ip }) => {
+    limit('rec:' + ip, 10);
+    const username = Sync.normUser(body.username);
+    const u = Sync.USERNAME.test(username) ? await db.userByName(username) : null;
+    const h = sha('mono-rec:' + normCode(body.code));
+    const rec = u ? (u.recovery || []) : [];
+    const hit = rec.find((r) => !r.usedAt && crypto.timingSafeEqual(Buffer.from(r.h), Buffer.from(h)));
+    if (!u || !hit) fail(401, '@ ou código de recuperação incorretos (cada código vale uma vez).');
+    const next = String(body.password || '');
+    if (next.length < 8) fail(400, 'A nova senha precisa ter pelo menos 8 caracteres.');
+    hit.usedAt = now().toISOString();
+    await db.updateUser(u.id, { recovery: rec, passHash: await hashPassword(next), keyBackup: null });
+    const gone = await db.deleteSessionsOfUser(u.id);
+    kickSessions(u.id, gone);
+    log(`@${username} recuperou o acesso`);
+    const fresh = await db.userById(u.id);
+    return { ...(await newSession(fresh, req, ip)), recoveryLeft: recoveryLeft(fresh) };
+  }, { open: true });
+  // Onde estou logado.
+  route('GET', '/v1/me/sessions', async ({ me }) => ({
+    sessions: (await db.listSessions(me.user.id)).map((s) => ({ id: s.id, device: s.device || 'Mono', ip: s.ip || '', createdAt: s.createdAt, lastUsedAt: s.lastUsedAt || s.createdAt, current: s.tokenHash === me.tokenHash }))
+      .sort((a, b) => (b.current - a.current) || String(b.lastUsedAt).localeCompare(String(a.lastUsedAt))),
+  }));
+  route('DELETE', '/v1/me/sessions/:sid', async ({ params, me }) => {
+    const h = await db.deleteSessionById(me.user.id, params.sid);
+    if (!h) fail(404, 'Sessão não encontrada.');
+    kickSessions(me.user.id, [h]);
+    return { ok: true };
+  });
+  route('DELETE', '/v1/me/sessions', async ({ me }) => {
+    const gone = await db.deleteSessionsOfUser(me.user.id, me.tokenHash);
+    kickSessions(me.user.id, gone);
+    return { ok: true, signedOut: gone.length };
+  });
 
   // Perfil: nome, cor e foto. Quem divide workspace com a pessoa recebe a mudança na hora.
   route('PATCH', '/v1/me', async ({ body, me }) => {
     const fields = {};
     if (body.name !== undefined) fields.name = cleanName(body.name, 60);
     if (body.color !== undefined) { if (body.color && !COLOR_RE.test(body.color)) fail(400, 'Cor inválida.'); fields.color = body.color || null; }
+    if (body.publicKey !== undefined) { if (body.publicKey && !okB64(body.publicKey, 400)) fail(400, 'Chave pública inválida.'); fields.publicKey = body.publicKey || null; }
+    if (body.keyBackup !== undefined) { if (body.keyBackup && !okBlob(body.keyBackup, ['salt', 'iv', 'ct'])) fail(400, 'Backup de chave inválido.'); fields.keyBackup = body.keyBackup || null; }
     if (body.avatar !== undefined) {
       if (body.avatar && (!AVATAR_RE.test(body.avatar) || body.avatar.length > MAX_AVATAR)) fail(400, 'Imagem inválida ou grande demais (até 90 KB, PNG, JPEG ou WebP).');
       fields.avatar = body.avatar || null;
@@ -290,6 +377,43 @@ function createApp({ db, log = () => {}, now = () => new Date() }) {
     await db.markUndone(c.id, { username: me.user.username, at: now().toISOString(), changeId: r.change.id });
     return { version: r.version, change: r.change };
   });
+
+  // ---------- cofre de segredos (criptografia de ponta a ponta) ----------
+  const vaultMeta = (v) => (v && v.enabled ? { enabled: true, kid: v.kid, needsRotation: !!v.needsRotation, keys: Object.fromEntries(Object.entries(v.keys || {}).map(([k, b]) => [k, { fp: b.fp, kid: b.kid }])) } : { enabled: false });
+  route('GET', '/v1/workspaces/:id/vault', async ({ params, me }) => {
+    const w = await memberWs(params.id, me.user);
+    const v = w.vault || {};
+    return { vault: { ...vaultMeta(v), myKey: v.enabled ? (v.keys || {})[me.user.id] || null : null } };
+  });
+  // Ligar/girar (enabled + kid + keys com replace) ou só acrescentar chaves embrulhadas para membros.
+  route('PUT', '/v1/workspaces/:id/vault', async ({ params, body, me }) => serial('vault:' + params.id, async () => {
+    const w = await memberWs(params.id, me.user);
+    const v = w.vault || { enabled: false, keys: {} };
+    const memberSet = new Set(w.members.map((m) => m.userId));
+    const keys = body.keys && typeof body.keys === 'object' ? body.keys : {};
+    for (const [uid, b] of Object.entries(keys)) {
+      if (!memberSet.has(uid)) fail(400, 'Chave para quem não é membro.');
+      if (!okBlob(b, ['epk', 'iv', 'ct', 'fp', 'kid'], 1200)) fail(400, 'Chave embrulhada inválida.');
+    }
+    let next;
+    if (body.enabled === false) {
+      if (w.ownerId !== me.user.id) fail(403, 'Só quem criou o workspace desliga o cofre.');
+      next = { enabled: false, keys: {} };
+    } else if (body.replace) {
+      mustEdit(w, me.user);
+      if (v.enabled && v.kid !== body.prevKid) fail(409, 'O cofre mudou ao mesmo tempo. Tente de novo.');
+      if (!okB64(body.kid, 64)) fail(400, 'Identificador da chave inválido.');
+      if (!keys[me.user.id]) fail(400, 'Inclua a sua própria chave.');
+      next = { enabled: true, kid: body.kid, keys, needsRotation: false, by: me.user.username, at: now().toISOString() };
+    } else {
+      if (!v.enabled) fail(409, 'O cofre deste workspace está desligado.');
+      for (const b of Object.values(keys)) if (b.kid !== v.kid) fail(409, 'Chave de uma versão antiga do cofre.');
+      next = { ...v, keys: { ...(v.keys || {}), ...keys } };
+    }
+    await db.updateWorkspaceMeta(w.id, { vault: next });
+    emit(memberIds(w), 'vault', { ws: w.id, vault: vaultMeta(next), by: me.user.username });
+    return { vault: vaultMeta(next) };
+  }));
 
   // ---------- comentários ----------
   route('GET', '/v1/workspaces/:id/comments', async ({ params, me }) => {
@@ -411,6 +535,10 @@ function createApp({ db, log = () => {}, now = () => new Date() }) {
     if (!self && w.ownerId !== me.user.id) fail(403, 'Só quem criou o workspace pode remover pessoas.');
     if (self && w.ownerId === me.user.id) fail(400, 'Você criou este workspace: para sair, exclua-o para todos.');
     await db.removeMember(w.id, target.userId);
+    if (w.vault && w.vault.enabled) {
+      const keys = { ...(w.vault.keys || {}) }; delete keys[target.userId];
+      await db.updateWorkspaceMeta(w.id, { vault: { ...w.vault, keys, needsRotation: true } });
+    }
     const members = w.members.filter((m) => m.userId !== target.userId);
     emit([target.userId], 'removed', { ws: w.id, reason: self ? 'left' : 'kicked', by: me.user.username });
     emit(members.map((m) => m.userId), 'members', { ws: w.id, members, left: target.username, by: me.user.username });
@@ -445,7 +573,7 @@ function createApp({ db, log = () => {}, now = () => new Date() }) {
   route('GET', '/v1/events', async ({ req, res, me, query }) => {
     res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', connection: 'keep-alive', 'x-accel-buffering': 'no' });
     res.write('retry: 3000\n\n');
-    const entry = { res, clientId: String(query.get('clientId') || '') };
+    const entry = { res, clientId: String(query.get('clientId') || ''), tokenHash: me.tokenHash };
     const set = streams.get(me.user.id) || new Set();
     set.add(entry); streams.set(me.user.id, set);
     res.write(`event: hello\ndata: ${JSON.stringify({ user: publicUser(me.user) })}\n\n`);

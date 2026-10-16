@@ -11,6 +11,7 @@ const updater = require('./updater');
 const { createCloud } = require('./cloud');
 const { createMock } = require('./mock');
 const { createRealtime } = require('./realtime');
+const { createGitDir } = require('./gitdir');
 
 // Arquivos que a interface pode mandar numa requisição (form-data, binário, certificados):
 // só os que o usuário escolheu na janela do sistema. Coleções importadas não conseguem apontar para outros arquivos.
@@ -24,6 +25,18 @@ function allowFile(p) {
   const set = allowed();
   set.add(path.resolve(p));
   try { fs.writeFileSync(allowedFile(), JSON.stringify([...set].slice(-500))); } catch { /* best effort */ }
+}
+// Pastas de coleções (Git): só as escolhidas na janela do sistema.
+let allowedDirs = null;
+const allowedDirFile = () => path.join(app.getPath('userData'), 'allowed-dirs.json');
+function dirsAllowed() {
+  if (!allowedDirs) { try { allowedDirs = new Set(JSON.parse(fs.readFileSync(allowedDirFile(), 'utf8'))); } catch { allowedDirs = new Set(); } }
+  return allowedDirs;
+}
+function allowDir(p) {
+  const set = dirsAllowed();
+  set.add(path.resolve(p));
+  try { fs.writeFileSync(allowedDirFile(), JSON.stringify([...set].slice(-200))); } catch { /* best effort */ }
 }
 function readAllowed(p) {
   const full = path.resolve(String(p || ''));
@@ -196,7 +209,9 @@ app.whenReady().then(() => {
     return true;
   }));
   // Servidor do Mono (workspaces compartilhados). O app nunca fala direto com o banco.
+  const osName = { win32: 'Windows', darwin: 'macOS', linux: 'Linux' }[process.platform] || process.platform;
   const cloud = createCloud({
+    device: `${require('os').hostname()} · ${osName} · Mono ${app.getVersion()}`,
     fetchImpl: (url, opts) => network.fetch(url, opts),
     emit: (type, payload) => { if (win && !win.isDestroyed()) win.webContents.send('cloud:' + type, payload); },
   });
@@ -206,6 +221,19 @@ app.whenReady().then(() => {
   ipcMain.handle('mock:update', guard((opts) => mock.update(opts)));
   ipcMain.handle('mock:stop', guard(() => mock.stop()));
   ipcMain.handle('mock:status', guard(() => mock.status()));
+  // Coleções como arquivos (Git)
+  const gitdir = createGitDir({ isAllowed: (p) => dirsAllowed().has(p), onChange: (e) => { if (win && !win.isDestroyed()) win.webContents.send('git:changed', e); } });
+  ipcMain.handle('git:pickDir', guard(async ({ title } = {}) => {
+    const r = await dialog.showOpenDialog(win, { title: title || 'Escolha a pasta da coleção (dentro do seu repositório)', properties: ['openDirectory', 'createDirectory'] });
+    if (r.canceled || !r.filePaths[0]) return { ok: false, canceled: true };
+    allowDir(r.filePaths[0]);
+    return { ok: true, path: path.resolve(r.filePaths[0]) };
+  }));
+  ipcMain.handle('git:write', guard(({ dir, files }) => ({ ok: true, ...gitdir.write(dir, files || []) })));
+  ipcMain.handle('git:read', guard(({ dir }) => ({ ok: true, files: gitdir.read(dir) })));
+  ipcMain.handle('git:watch', guard(({ dir }) => gitdir.watch(dir)));
+  ipcMain.handle('git:unwatch', guard(({ dir }) => gitdir.unwatch(dir)));
+  app.on('before-quit', () => gitdir.closeAll());
   // WebSocket e SSE: a interface manda a requisição; aqui ela é montada (variáveis, auth) e a conexão fica aberta.
   const realtime = createRealtime({ emit: (e) => { if (win && !win.isDestroyed()) win.webContents.send('rt:event', e); }, ...network.realtimeOptions() });
   ipcMain.handle('rt:connect', guard(({ id, kind, req, vars }) => {

@@ -30,6 +30,8 @@
   - [Trabalhar em equipe](#trabalhar-em-equipe)
   - [Histórico, comentários e presença](#histórico-comentários-e-presença)
   - [Monitores](#monitores)
+  - [Conta e segurança](#conta-e-segurança)
+  - [Cofre de segredos do time](#cofre-de-segredos-do-time)
   - [Scripts e testes (API pm.* do Postman)](#scripts-e-testes-api-pm-do-postman)
   - [Collection Runner com CSV](#collection-runner-com-csv)
   - [Comparar ambientes](#comparar-ambientes)
@@ -37,6 +39,10 @@
   - [Corpo da requisição](#corpo-da-requisição)
   - [GraphQL, WebSocket e SSE](#graphql-websocket-e-sse)
   - [Exemplos salvos e mock server](#exemplos-salvos-e-mock-server)
+  - [Busca global (Ctrl + K)](#busca-global-ctrl--k)
+  - [Testes gerados](#testes-gerados)
+  - [Cookies](#cookies)
+  - [Coleções no Git](#coleções-no-git)
   - [SOAP, SEFAZ e certificado digital](#soap-sefaz-e-certificado-digital)
   - [Assinatura digital de XML](#assinatura-digital-de-xml)
   - [Trava de produção](#trava-de-produção)
@@ -240,6 +246,29 @@ O seletor de tipo oferece JSON, XML / SOAP, texto, **form-data** (campos e arqui
 
 Arquivos são lidos na hora do envio, e só os que você escolheu na janela do Windows. Uma coleção importada não consegue fazer o app enviar outros arquivos do seu computador.
 
+### Conta e segurança
+
+Ao criar a conta, o Mono mostra **10 códigos de recuperação**. O Mono não usa e-mail, então eles são a forma de entrar se você esquecer a senha. Cada código vale uma vez, e dá para gerar novos quando quiser.
+
+![Códigos de recuperação](docs/screenshots/30-codigos-recuperacao.png)
+
+Em **Sua conta**:
+- **Trocar senha:** as outras sessões são encerradas.
+- **Códigos de recuperação:** mostra quantos restam e gera novos.
+- **Onde estou conectado:** lista cada computador e o último uso, com **Encerrar** e **Sair de todos os outros**. O Mono daquele computador sai da conta na hora. Útil se perder o notebook.
+- **Esqueci a senha:** na tela de entrar, use o @, um código e a nova senha.
+
+### Cofre de segredos do time
+
+Em **Pessoas e convites**, ligue o **Cofre de segredos**. A partir daí, os valores com cadeado (tokens, senhas, chaves) vão para o time **cifrados de ponta a ponta**: o servidor guarda, mas não consegue ler. Quando alguém troca um segredo, os outros recebem o valor novo na hora.
+
+![Cofre de segredos](docs/screenshots/29-cofre.png)
+
+- **Chaves de cada pessoa:** cada uma tem um par de chaves próprio, criado no cadastro. A chave privada fica no computador, cifrada pelo Windows. Para entrar em outro computador, um backup dela cifrado com a sua senha fica no servidor.
+- **Chave do workspace:** cada workspace tem uma chave (AES-256), entregue a cada membro embrulhada com a chave pública dele. Quem entra depois recebe a chave automaticamente de um colega.
+- **Saída de alguém:** quem criou o workspace gera uma chave nova automaticamente, e quem saiu não abre os segredos novos.
+- **Ao recuperar a conta com um código:** o Mono cria uma chave nova, e os colegas entregam a chave do cofre de novo.
+
 ### GraphQL, WebSocket e SSE
 
 **GraphQL:** no Body, escolha **GraphQL**. A tela fica dividida em query e variáveis (JSON). **Buscar schema** carrega o schema da API por introspecção, usando a mesma URL, headers e autenticação. Depois disso o editor sugere campos e argumentos no ponto certo da query, com o tipo de cada um. Com mais de uma operação, escolha qual executar.
@@ -267,6 +296,43 @@ No menu da coleção, **Mock server…** sobe uma API falsa em `http://127.0.0.1
 - para escolher um exemplo específico, use o header `x-mono-example`.
 
 ![Mock server](docs/screenshots/28-mock-server.png)
+
+### Busca global (Ctrl + K)
+
+**Ctrl + K** (ou o campo **Buscar** no topo) acha qualquer coisa: requisições (por nome, URL ou método), coleções, pastas, ambientes, variáveis e workspaces, inclusive de outros workspaces. Também dá acesso às ações do app (monitores, cookies, configurações…). Use as setas para navegar e Enter para abrir.
+
+![Busca global](docs/screenshots/31-busca.png)
+
+### Testes gerados
+
+Na resposta, **Gerar testes ▾** escreve os `pm.test` a partir do que voltou:
+- **Testes básicos:** status, tempo, Content-Type, campos obrigatórios e tipos do JSON, até dois níveis.
+- **Com IA (Claude ou ChatGPT):** também formatos e regras de negócio, como datas, CPF/CNPJ, chave de NF-e e valores não negativos.
+
+Você revisa no editor e escolhe **Adicionar** ou **Adicionar e rodar**. É o par ideal dos monitores, que só pegam erro de conteúdo quando existem testes.
+
+![Gerar testes](docs/screenshots/32-gerar-testes.png)
+
+### Cookies
+
+O Mono guarda o `Set-Cookie` das respostas e manda o `Cookie` nas próximas requisições para o mesmo domínio, respeitando Path, Domain, Secure e validade. Um header `Cookie` escrito à mão vence. Em **Cookies…** (menu do workspace ou Ctrl + K) você vê, edita e apaga os cookies por domínio, ou desliga o comportamento automático. Os cookies ficam por workspace, só no seu computador.
+
+### Coleções no Git
+
+No menu da coleção, **Salvar como arquivos (Git)…** vincula a coleção a uma pasta do seu repositório:
+
+```
+mono.collection.json              ← nome, auth, variáveis (sem segredos), scripts, pastas e ordem
+pedidos/consultar-pedido.req.json ← uma requisição por arquivo
+login.req.json
+```
+
+- **Gravação automática:** a cada mudança, o Mono grava só o que mudou, com o JSON sempre no mesmo formato, para os diffs ficarem limpos. Commit e push ficam por sua conta.
+- **Mudanças por fora:** quando os arquivos mudam por fora (`git pull`, troca de branch), a coleção recarrega sozinha.
+- **Abrir de uma pasta:** **Abrir coleção de uma pasta (Git)…** abre uma coleção que veio de um repositório.
+- **O que fica fora dos arquivos:** segredos e o caminho da pasta, que é só deste computador.
+
+![Coleção no Git](docs/screenshots/33-colecao-git.png)
 
 ### SOAP, SEFAZ e certificado digital
 
@@ -438,6 +504,7 @@ O GitHub Actions (`.github/workflows/release.yml`) roda os testes, gera o instal
 - **Interface isolada:** `contextIsolation` e `sandbox: true`, ponte `contextBridge` com funções explícitas, checagem do remetente em todo IPC e CSP restrita.
 - **Scripts:** rodam num Web Worker sem acesso ao app. `pm.sendRequest` e `pm.xml.sign` passam por funções controladas.
 - **Preview de HTML:** usa um protocolo próprio (`mono-preview://`) com scripts e formulários bloqueados.
+- **Cofre do time:** com o cofre ligado, segredos compartilhados vão cifrados de ponta a ponta (ECDH P-256 + AES-256-GCM). O servidor nunca vê a senha, a chave privada nem os valores.
 - **Segredos:** variáveis de segredo (de todos os workspaces), senhas de proxy e de certificado e chaves de IA ficam criptografadas com o `safeStorage` (DPAPI no Windows).
 - **Arquivos:** só são lidos os que você escolheu na janela do sistema. Coleções importadas não apontam para arquivos do seu computador.
 - **Dados:** ficam em `%APPDATA%\Mono\mono-data.json`. Só vão para o servidor do Mono os workspaces que você compartilhar, sem os segredos.

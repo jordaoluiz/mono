@@ -36,6 +36,7 @@ function createMongoDb(uri, dbName = 'mono') {
         users.createIndex({ username: 1 }, { unique: true }),
         sessions.createIndex({ tokenHash: 1 }, { unique: true }),
         sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
+        sessions.createIndex({ userId: 1 }),
         workspaces.createIndex({ 'members.userId': 1 }),
         invites.createIndex({ toUserId: 1, status: 1 }),
         invites.createIndex({ wsId: 1, toUserId: 1 }, { unique: true, partialFilterExpression: { status: 'pending' } }),
@@ -61,6 +62,15 @@ function createMongoDb(uri, dbName = 'mono') {
     async createSession(s) { await sessions.insertOne({ ...s, createdAt: new Date(s.createdAt), expiresAt: new Date(s.expiresAt) }); },
     async sessionByHash(h) { return sessions.findOne({ tokenHash: h, expiresAt: { $gt: new Date() } }, { projection: { _id: 0 } }); },
     async deleteSession(h) { await sessions.deleteOne({ tokenHash: h }); },
+    async listSessions(userId) { return sessions.find({ userId, expiresAt: { $gt: new Date() } }, { projection: { _id: 0 } }).sort({ lastUsedAt: -1 }).limit(100).toArray(); },
+    async deleteSessionById(userId, id) { const s = await sessions.findOneAndDelete({ userId, id }); const doc = s && (s.value !== undefined ? s.value : s); return doc ? doc.tokenHash : null; },
+    async deleteSessionsOfUser(userId, exceptHash = null) {
+      const q = { userId, ...(exceptHash ? { tokenHash: { $ne: exceptHash } } : {}) };
+      const list = await sessions.find(q, { projection: { tokenHash: 1 } }).toArray();
+      await sessions.deleteMany(q);
+      return list.map((s) => s.tokenHash);
+    },
+    async touchSession(h, at) { await sessions.updateOne({ tokenHash: h }, { $set: { lastUsedAt: at } }); },
     // workspaces
     async createWorkspace(w) { await workspaces.insertOne(toDoc(packWs(w))); },
     async getWorkspace(id) { return unpackWs(fromDoc(await workspaces.findOne({ _id: id }))); },

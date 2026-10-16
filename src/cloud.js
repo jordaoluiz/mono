@@ -13,7 +13,7 @@ function baseOf(url) {
   return u.origin + u.pathname.replace(/\/+$/, '');
 }
 
-function createCloud({ fetchImpl, emit }) {
+function createCloud({ fetchImpl, emit, device = '' }) {
   let conn = null; // { ctrl, stopped }
 
   async function call({ url, token, method = 'GET', path, body } = {}) {
@@ -22,6 +22,7 @@ function createCloud({ fetchImpl, emit }) {
       const base = baseOf(url);
       const headers = { accept: 'application/json' };
       if (token) headers.authorization = `Bearer ${token}`;
+      if (device) headers['x-mono-device'] = device;
       if (body !== undefined) headers['content-type'] = 'application/json';
       const res = await fetchImpl(base + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(30000) });
       const text = await res.text();

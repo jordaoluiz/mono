@@ -11,10 +11,16 @@
 
   const clone = (o) => (o === undefined ? undefined : JSON.parse(JSON.stringify(o)));
   const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-  const LOCAL_ONLY = ['open']; // estado da árvore (aberta/fechada) é de cada pessoa
+  const LOCAL_ONLY = ['open', 'gitDir', 'gitPrint']; // estado da árvore e a pasta Git (caminho deste computador) são de cada pessoa
   const strip = (o, extra = []) => { const c = clone(o) || {}; for (const k of [...LOCAL_ONLY, ...extra]) delete c[k]; return c; };
   // Segredos (cadeado) nunca saem do computador: vão vazios e cada pessoa preenche o seu.
-  const hideSecrets = (vars) => (vars || []).map((v) => (v && v.secret ? { ...v, value: '' } : v));
+  // Com o cofre ligado, o segredo viaja cifrado em `vault` ({ kid, iv, ct }); os campos _v* são locais (controle do cofre).
+  const hideSecrets = (vars) => (vars || []).map((v) => {
+    if (!v || !v.secret) return v;
+    const out = { ...v, value: '' };
+    for (const k of Object.keys(out)) if (k.startsWith('_v')) delete out[k];
+    return out;
+  });
 
   // Parte compartilhada de um workspace, sem estado local nem segredos.
   function shareable(d) {
@@ -87,8 +93,14 @@
   const remove = (list, id) => { const i = list.findIndex((x) => x.id === id); if (i >= 0) list.splice(i, 1); };
   // Mantém o valor local das variáveis secretas (o que vem de fora chega vazio).
   function keepSecrets(oldVars, newVars) {
-    const mine = new Map((oldVars || []).filter((v) => v && v.secret).map((v) => [v.key, v.value]));
-    return (newVars || []).map((v) => (v && v.secret && mine.has(v.key) ? { ...v, value: mine.get(v.key) } : v));
+    const mine = new Map((oldVars || []).filter((v) => v && v.secret).map((v) => [v.key, v]));
+    return (newVars || []).map((v) => {
+      if (!v || !v.secret || !mine.has(v.key)) return v;
+      const old = mine.get(v.key);
+      const out = { ...v, value: old.value };
+      for (const k of Object.keys(old)) if (k.startsWith('_v')) out[k] = old[k];
+      return out;
+    });
   }
 
   // Aplica as operações em `d` (estado do app ou documento do servidor) e devolve `d`.
@@ -98,7 +110,7 @@
     for (const op of ops || []) {
       const v = clone(op.v);
       switch (op.t) {
-        case 'col': upsert(d.collections, v, (old, n) => ({ ...n, requests: old ? old.requests : [], folders: old ? old.folders || [] : [], ...(old && old.open !== undefined ? { open: old.open } : {}) })); break;
+        case 'col': upsert(d.collections, v, (old, n) => ({ ...n, requests: old ? old.requests : [], folders: old ? old.folders || [] : [], ...(old && old.open !== undefined ? { open: old.open } : {}), ...(old && old.gitDir ? { gitDir: old.gitDir, gitPrint: old.gitPrint } : {}) })); break;
         case 'colDel': remove(d.collections, op.id); break;
         case 'colOrder': reorder(d.collections, op.ids); break;
         case 'fold': { const c = col(op.col); if (c) upsert(c.folders ||= [], v, (old, n) => ({ ...n, ...(old && old.open !== undefined ? { open: old.open } : {}) })); break; }
