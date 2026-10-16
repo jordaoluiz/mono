@@ -149,17 +149,40 @@ function switchWorkspace(id, { quiet = false } = {}) {
 }
 function renderWorkspaceBtn() {
   const w = activeWorkspace();
+  if (!w) return;
   $('#wsName').textContent = w.name;
-  $('#wsBtn').title = `Workspace: ${w.name}${w.description ? ' — ' + w.description : ''}\n${statsText(wsStats(w))}`;
+  const people = $('#wsPeople');
+  const n = w.shared ? (w.shared.members || []).length : 0;
+  people.className = 'ws-people' + (w.shared ? '' : ' hidden') + ' ' + (w.shared && loggedIn() ? cloud.state : 'off');
+  $('.n', people).textContent = n;
+  $('#wsInvites').classList.toggle('hidden', !cloud.invites.length);
+  $('#wsInvites').textContent = cloud.invites.length;
+  const sync = w.shared ? (loggedIn() ? { online: 'sincronizando em tempo real', connecting: 'conectando…', offline: 'sem conexão — as mudanças vão quando voltar' }[cloud.state] || 'desconectado' : 'entre na conta para sincronizar') : '';
+  $('#wsBtn').title = `Workspace: ${w.name}${w.description ? ' — ' + w.description : ''}\n${statsText(wsStats(w))}${w.shared ? `\nCompartilhado com ${plural(n, 'pessoa', 'pessoas')} · ${sync}` : ''}${cloud.invites.length ? `\n${plural(cloud.invites.length, 'convite pendente', 'convites pendentes')}` : ''}`;
 }
+const ICON_PEOPLE = '<svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M15.5 5.2a3.2 3.2 0 0 1 0 5.6M17.5 13.6A5.5 5.5 0 0 1 20.5 19"/></svg>';
 function openWorkspaceMenu(anchor) {
-  const items = data.workspaces.map((w) => ({
-    label: h('span', { class: 'ws-mi' + (w.id === data.activeWorkspaceId ? ' on' : '') },
-      h('span', { class: 'ws-mi-check', html: w.id === data.activeWorkspaceId ? icons.check : '' }),
-      h('span', { class: 'ws-mi-name' }, w.name)),
+  const cur = activeWorkspace();
+  const items = [];
+  items.push(loggedIn()
+    ? { label: h('span', { class: 'ws-mi acct' }, h('span', { class: 'ws-mi-av' }, (me().name || me().username)[0].toUpperCase()), h('span', { class: 'ws-mi-name' }, '@' + me().username), h('span', { class: 'cloud-dot ' + cloud.state })), run: () => openAccount() }
+    : { label: h('span', { class: 'ws-mi acct' }, h('span', { class: 'ws-mi-av off', html: ICON_PEOPLE }), h('span', { class: 'ws-mi-name' }, 'Entrar ou criar conta')), run: () => openAccount() });
+  if (cloud.invites.length) {
+    items.push('-');
+    for (const inv of cloud.invites) items.push({ label: h('span', { class: 'ws-mi invite' }, h('span', { class: 'ws-mi-check inv' }), h('span', { class: 'ws-mi-name' }, h('b', {}, inv.wsName), h('small', {}, ' · convite de @' + inv.from.username))), run: () => openInvite(inv) });
+  }
+  items.push('-');
+  for (const w of data.workspaces) items.push({
+    label: h('span', { class: 'ws-mi' + (w === cur ? ' on' : '') },
+      h('span', { class: 'ws-mi-check', html: w === cur ? icons.check : '' }),
+      h('span', { class: 'ws-mi-name' }, w.name),
+      w.shared ? h('span', { class: 'ws-mi-shared', title: 'Compartilhado', html: ICON_PEOPLE }) : null),
     run: () => switchWorkspace(w.id),
-  }));
-  showMenu(anchor, [...items, '-', { label: '+ Novo workspace', run: () => openWorkspaceForm() }, { label: 'Gerenciar workspaces…', run: openWorkspaces }]);
+  });
+  items.push('-');
+  items.push({ label: cur.shared ? 'Pessoas e convites…' : 'Compartilhar este workspace…', run: () => openShare(cur) });
+  items.push({ label: '+ Novo workspace', run: () => openWorkspaceForm() }, { label: 'Gerenciar workspaces…', run: openWorkspaces });
+  showMenu(anchor, items);
 }
 // Criar (sem `w`) ou editar nome/descrição.
 function openWorkspaceForm(w = null, { back = null } = {}) {
@@ -176,6 +199,7 @@ function openWorkspaceForm(w = null, { back = null } = {}) {
       close();
       if (w) {
         w.name = n; w.description = desc.value.trim(); persist(); renderWorkspaceBtn();
+        if (w.shared && loggedIn()) cloudCall('PATCH', `/v1/workspaces/${w.shared.id}`, { name: w.name, description: w.description }).then((r) => { if (!r.ok) toast(r.error, 4000); });
         if (back) back();
         return;
       }
@@ -216,8 +240,19 @@ function duplicateWorkspace(w) {
 }
 async function deleteWorkspace(w) {
   if (data.workspaces.length < 2) { toast('Precisa existir pelo menos um workspace.'); return false; }
-  const ok = await confirmModal({ title: `Excluir “${w.name}”?`, sub: `${statsText(wsStats(w))} e o histórico deste workspace serão apagados. Isso não pode ser desfeito.`, ok: 'Excluir workspace' });
+  const owner = isOwner(w);
+  const others = w.shared ? (w.shared.members || []).length - 1 : 0;
+  const ok = await confirmModal(w.shared && loggedIn()
+    ? owner
+      ? { title: `Excluir “${w.name}” para todos?`, sub: `O workspace é apagado do servidor${others ? ` e ${plural(others, 'pessoa perde', 'pessoas perdem')} o acesso (cada uma fica com uma cópia local)` : ''}. ${statsText(wsStats(w))} saem deste computador.`, ok: 'Excluir para todos' }
+      : { title: `Sair e apagar “${w.name}”?`, sub: 'Você sai do workspace compartilhado e a cópia deste computador é apagada. Os colegas continuam com o deles.', ok: 'Sair e apagar' }
+    : { title: `Excluir “${w.name}”?`, sub: `${statsText(wsStats(w))} e o histórico deste workspace serão apagados. Isso não pode ser desfeito.`, ok: 'Excluir workspace' });
   if (!ok) return false;
+  if (w.shared && loggedIn()) {
+    const r = owner ? await cloudCall('DELETE', `/v1/workspaces/${w.shared.id}`) : await cloudCall('DELETE', `/v1/workspaces/${w.shared.id}/members/${me().id}`);
+    if (!r.ok && r.status !== 404) { toast(r.error, 4000); return false; }
+    w.shared = null;
+  }
   if (w.id === data.activeWorkspaceId) switchWorkspace(data.workspaces.find((x) => x !== w).id, { quiet: true });
   data.workspaces.splice(data.workspaces.indexOf(w), 1);
   persist(); renderWorkspaceBtn();
@@ -235,6 +270,8 @@ function openWorkspaces() {
         more.addEventListener('click', (e) => {
           e.stopPropagation();
           showMenu(more, [
+            { label: w.shared ? 'Pessoas e convites…' : 'Compartilhar…', run: () => openShare(w) },
+            ...(w.shared && !isOwner(w) && loggedIn() ? [{ label: 'Sair (manter cópia local)', run: () => leaveShared(w, () => openWorkspaces()) }] : []),
             { label: 'Editar nome e descrição', run: () => openWorkspaceForm(w, { back: openWorkspaces }) },
             { label: 'Duplicar', run: () => { duplicateWorkspace(w); draw(); } },
             '-',
@@ -244,7 +281,8 @@ function openWorkspaces() {
         list.append(h('div', { class: 'ws-row' + (on ? ' on' : ''), ondblclick: () => { if (!on) switchWorkspace(w.id); } },
           h('div', { class: 'ws-avatar' }, (w.name.trim()[0] || '?').toUpperCase()),
           h('div', { class: 'ws-info' },
-            h('div', { class: 'ws-title' }, w.name, on ? h('span', { class: 'ws-badge' }, 'Atual') : null),
+            h('div', { class: 'ws-title' }, w.name, on ? h('span', { class: 'ws-badge' }, 'Atual') : null,
+              w.shared ? h('span', { class: 'ws-badge shared', title: (w.shared.members || []).map((m) => '@' + m.username).join(', '), html: `${ICON_PEOPLE} ${(w.shared.members || []).length}` }) : null),
             w.description ? h('div', { class: 'ws-desc' }, w.description) : null,
             h('div', { class: 'ws-stats' }, statsText(wsStats(w)))),
           on ? null : h('button', { class: 'btn-ghost', onclick: () => switchWorkspace(w.id) }, 'Abrir'),
@@ -262,11 +300,390 @@ function openWorkspaces() {
   });
 }
 
+// ---------- Conta e workspaces compartilhados ----------
+// O app fala com o servidor do Mono (nunca com o banco). Cada workspace compartilhado guarda em w.shared:
+// { id, version, base, ownerId, members } — `base` é a última versão confirmada pelo servidor; a diferença
+// entre ela e o estado atual vira operações enviadas a cada mudança. Mudanças dos colegas chegam por eventos.
+const Sync = window.MonoSync;
+const MONO_CLOUD_URL = ''; // endereço padrão do servidor (preenchido quando o servidor estiver no ar)
+const cloud = { state: 'off', invites: [], clientId: uid('cli'), timer: null, busy: new Set(), again: new Set(), buffer: new Map(), own: new Map(), gapTimer: new Map() };
+const cloudCfg = () => { const s = (data.settings ||= {}); return (s.cloud ||= { url: MONO_CLOUD_URL, token: '', user: null }); };
+const cloudUrl = () => cloudCfg().url || MONO_CLOUD_URL;
+const loggedIn = () => !!(cloudCfg().token && cloudCfg().user && cloudUrl());
+const me = () => cloudCfg().user;
+const sharedWs = () => data.workspaces.filter((w) => w.shared);
+const wsByShared = (id) => data.workspaces.find((w) => w.shared && w.shared.id === id);
+const isOwner = (w) => w.shared && me() && w.shared.ownerId === me().id;
+async function cloudCall(method, path, body) {
+  const r = await api.cloud.call({ url: cloudUrl(), token: cloudCfg().token, method, path, body });
+  if (r.status === 401 && cloudCfg().token) cloudLoggedOut('Sua sessão expirou. Entre de novo para continuar sincronizando.');
+  return r;
+}
+function cloudLoggedOut(msg) {
+  const c = cloudCfg(); c.token = ''; c.user = null;
+  api.cloud.disconnect(); cloud.state = 'off'; cloud.invites = [];
+  persist(); renderWorkspaceBtn();
+  if (msg) toast(msg, 4000);
+}
+function cloudStart() {
+  if (!loggedIn()) return;
+  api.cloud.connect({ url: cloudUrl(), token: cloudCfg().token, clientId: cloud.clientId });
+}
+async function refreshInvites() {
+  const r = await cloudCall('GET', '/v1/invites');
+  if (r.ok) { cloud.invites = r.data.invites; renderWorkspaceBtn(); }
+}
+// Aplica mudanças vindas de fora num workspace (ativo ou guardado) e atualiza a tela.
+function applyRemote(w, ops) {
+  const local = wsData(w);
+  Sync.applyOps(local, ops);
+  w.shared.base = Sync.applyOps(w.shared.base || Sync.shareable({}), ops);
+  if (w.id !== data.activeWorkspaceId) return;
+  const s = session();
+  for (const t of s.tabs) {
+    if (!t.ref) continue;
+    const f = findRef(t.ref);
+    if (!f) { t.ref = null; t.dirty = true; continue; } // apagada por um colega: vira rascunho
+    if (!t.dirty && JSON.stringify(f.req) !== JSON.stringify(t.draft)) t.draft = clone(f.req);
+  }
+  if (data.activeEnvId && !envById(data.activeEnvId)) data.activeEnvId = data.environments[0]?.id || '';
+  renderSidebar(); renderTabs(); renderEnvSelect();
+  if (!activeTab()?.dirty) renderRequest();
+}
+function drain(w) {
+  const id = w.shared.id;
+  const buf = cloud.buffer.get(id) || new Map(), own = cloud.own.get(id) || new Set();
+  for (;;) {
+    const next = w.shared.version + 1;
+    if (buf.has(next)) { applyRemote(w, buf.get(next)); buf.delete(next); w.shared.version = next; }
+    else if (own.has(next)) { own.delete(next); w.shared.version = next; }
+    else break;
+  }
+  clearTimeout(cloud.gapTimer.get(id));
+  if (buf.size) cloud.gapTimer.set(id, setTimeout(() => resync(w), 2500)); // faltou um pedaço: busca tudo
+  persist();
+}
+// Envia o que mudou desde a última versão confirmada.
+async function pushOps(w) {
+  if (!w.shared || !loggedIn()) return;
+  const id = w.shared.id;
+  if (cloud.busy.has(id)) { cloud.again.add(id); return; }
+  const ops = Sync.diff(w.shared.base || Sync.shareable({}), Sync.shareable(wsData(w)));
+  if (!ops.length) return;
+  cloud.busy.add(id);
+  try {
+    const r = await cloudCall('POST', `/v1/workspaces/${id}/ops`, { ops, clientId: cloud.clientId });
+    if (!w.shared) return;
+    if (r.ok) {
+      w.shared.base = Sync.applyOps(w.shared.base || Sync.shareable({}), ops);
+      const crossed = r.data.version !== w.shared.version + 1;
+      if (!cloud.own.has(id)) cloud.own.set(id, new Set());
+      cloud.own.get(id).add(r.data.version);
+      drain(w);
+      if (crossed) setTimeout(() => resync(w), 300); // um colega gravou junto: confere com o servidor
+    } else if (r.status === 404) detachShared(w, 'Este workspace não está mais compartilhado com você.');
+    else if (r.status && r.status !== 401) toast(r.error, 4000);
+  } finally {
+    cloud.busy.delete(id);
+    if (cloud.again.delete(id)) pushOps(w);
+  }
+}
+function scheduleSync() {
+  if (!data?.workspaces || !loggedIn()) return;
+  const w = activeWorkspace();
+  if (!w?.shared) return;
+  clearTimeout(cloud.timer);
+  cloud.timer = setTimeout(() => pushOps(w), 400);
+}
+// Busca a versão do servidor e junta com o que ainda não foi enviado daqui.
+async function resync(w) {
+  if (!w.shared || !loggedIn()) return;
+  const r = await cloudCall('GET', `/v1/workspaces/${w.shared.id}`);
+  if (!w.shared) return;
+  if (!r.ok) { if (r.status === 404) detachShared(w, `Você não faz mais parte de “${w.name}”. Ficou uma cópia só neste computador.`); return; }
+  const srv = r.data.workspace;
+  const local = wsData(w);
+  const pending = Sync.diff(w.shared.base || Sync.shareable({}), Sync.shareable(local));
+  Sync.applyOps(local, Sync.diff(Sync.shareable(local), srv.data));
+  Object.assign(w.shared, { base: srv.data, version: srv.version, ownerId: srv.ownerId, members: srv.members, invites: srv.invites || [] });
+  w.name = srv.name; w.description = srv.description || '';
+  cloud.buffer.delete(srv.id); cloud.own.delete(srv.id);
+  if (pending.length) Sync.applyOps(local, pending);
+  if (w.id === data.activeWorkspaceId) applyRemote(w, []);
+  renderWorkspaceBtn(); persist();
+  if (pending.length) pushOps(w);
+}
+function detachShared(w, msg) {
+  if (!w.shared) return;
+  w.shared = null;
+  persist(); renderWorkspaceBtn();
+  if (msg) toast(msg, 5000);
+}
+function onCloudEvent({ event, data: p }) {
+  if (!data) return;
+  if (event === 'hello') { refreshInvites(); for (const w of sharedWs()) resync(w); return; }
+  if (event === 'invite') {
+    cloud.invites = [p, ...cloud.invites.filter((i) => i.id !== p.id)];
+    renderWorkspaceBtn();
+    toast(`@${p.from.username} convidou você para “${p.wsName}”. Abra o menu do workspace para aceitar.`, 6000);
+    return;
+  }
+  const w = p && p.ws ? wsByShared(p.ws) : null;
+  if (!w) return;
+  if (event === 'ops') {
+    if (p.version <= w.shared.version) return;
+    if (!cloud.buffer.has(w.shared.id)) cloud.buffer.set(w.shared.id, new Map());
+    cloud.buffer.get(w.shared.id).set(p.version, p.ops);
+    drain(w);
+    if (w.id === data.activeWorkspaceId) toast(`@${p.by} alterou ${Sync.describe(p.ops, data)}`, 2600);
+  } else if (event === 'members') {
+    w.shared.members = p.members;
+    if (p.joined && p.joined !== me()?.username) toast(`@${p.joined} entrou em “${w.name}”`, 3500);
+    if (p.left && p.left !== me()?.username) toast(`@${p.left} saiu de “${w.name}”`, 3500);
+    w.shared.invites = (w.shared.invites || []).filter((i) => i.username !== p.joined);
+    persist(); renderWorkspaceBtn(); refreshShareModal(w);
+  } else if (event === 'workspace') {
+    if (p.name) w.name = p.name;
+    if (p.description !== undefined) w.description = p.description;
+    persist(); renderWorkspaceBtn();
+  } else if (event === 'invited') {
+    w.shared.invites = [...(w.shared.invites || []).filter((i) => i.username !== p.username), { username: p.username }];
+    refreshShareModal(w);
+  } else if (event === 'declined') {
+    w.shared.invites = (w.shared.invites || []).filter((i) => i.username !== p.username);
+    toast(`@${p.username} recusou o convite para “${w.name}”`, 3500);
+    refreshShareModal(w);
+  } else if (event === 'removed') {
+    const why = { deleted: `@${p.by} excluiu “${w.name}” para todos.`, kicked: `@${p.by} removeu você de “${w.name}”.`, left: `Você saiu de “${w.name}”.` }[p.reason] || '';
+    detachShared(w, `${why} Ficou uma cópia só neste computador.`);
+  }
+}
+function cloudInit() {
+  if (!api.cloud) return;
+  api.cloud.onState((s) => { cloud.state = s.state; if (s.state === 'unauthorized') cloudLoggedOut('Sua sessão expirou. Entre de novo para continuar sincronizando.'); else renderWorkspaceBtn(); });
+  api.cloud.onEvent(onCloudEvent);
+  cloudStart();
+}
+
+// Tela de conta: entrar ou criar conta (@ único + senha).
+function openAccount({ then = null } = {}) {
+  openModal((body, close) => {
+    const c = cloudCfg();
+    if (loggedIn()) {
+      const st = { online: 'Conectado', connecting: 'Conectando…', offline: 'Sem conexão — tentando de novo', off: 'Desconectado' }[cloud.state] || cloud.state;
+      body.append(
+        h('h2', {}, 'Sua conta'),
+        h('div', { class: 'acct-card' },
+          h('div', { class: 'ws-avatar big' }, (me().name || me().username)[0].toUpperCase()),
+          h('div', {}, h('div', { class: 'acct-name' }, me().name || me().username), h('div', { class: 'acct-user' }, '@' + me().username)),
+          h('span', { class: 'cloud-state ' + cloud.state }, h('span', { class: 'dot' }), st)),
+        h('p', { class: 'sub' }, `Servidor: ${cloudUrl()} · ${plural(sharedWs().length, 'workspace compartilhado', 'workspaces compartilhados')}`),
+        h('div', { class: 'modal-actions' },
+          h('button', { class: 'btn-ghost', onclick: async () => { await cloudCall('POST', '/v1/logout'); cloudLoggedOut(); close(); toast('Você saiu da conta. Os workspaces continuam aqui, sem sincronizar.', 4000); } }, 'Sair da conta'),
+          h('button', { class: 'btn-primary', onclick: close }, 'Fechar')));
+      return;
+    }
+    let mode = 'login';
+    const user = h('input', { placeholder: 'seu.usuario', spellcheck: 'false', autocomplete: 'username', maxlength: 31 });
+    const pass = h('input', { type: 'password', placeholder: 'mínimo 8 caracteres', autocomplete: 'current-password' });
+    const name = h('input', { placeholder: 'Como aparece para os colegas (opcional)', maxlength: 60 });
+    const server = h('input', { value: cloudUrl(), placeholder: 'https://mono-server.exemplo.com', spellcheck: 'false' });
+    const err = h('p', { class: 'ws-err hidden' });
+    const hint = h('div', { class: 'acct-hint' });
+    const nameField = h('div', { class: 'field hidden' }, h('label', {}, 'Nome'), name);
+    const title = h('h2', {}), sub = h('p', { class: 'sub' });
+    const go = h('button', { class: 'btn-primary' });
+    const swap = h('button', { class: 'linklike' });
+    const draw = () => {
+      const reg = mode === 'register';
+      title.textContent = reg ? 'Criar conta no Mono' : 'Entrar no Mono';
+      sub.textContent = reg ? 'Escolha um @ — é por ele que os colegas vão convidar você. Cada @ é único.' : 'Entre para compartilhar workspaces e receber convites.';
+      nameField.classList.toggle('hidden', !reg);
+      pass.autocomplete = reg ? 'new-password' : 'current-password';
+      go.textContent = reg ? 'Criar conta' : 'Entrar';
+      swap.textContent = reg ? 'Já tenho conta' : 'Criar uma conta';
+      err.classList.add('hidden');
+      checkUser();
+    };
+    const checkUser = () => {
+      const u = Sync.normUser(user.value);
+      hint.textContent = mode === 'register' && u ? (Sync.USERNAME.test(u) ? `Seu @ será @${u}` : '3 a 30 caracteres: letras minúsculas, números, ponto ou _') : '';
+      hint.classList.toggle('bad', mode === 'register' && !!u && !Sync.USERNAME.test(u));
+    };
+    user.addEventListener('input', checkUser);
+    swap.onclick = () => { mode = mode === 'login' ? 'register' : 'login'; draw(); user.focus(); };
+    const submit = async () => {
+      const show = (m) => { err.textContent = m; err.classList.remove('hidden'); };
+      const url = server.value.trim();
+      if (!url) return show('Informe o endereço do servidor do Mono.');
+      const u = Sync.normUser(user.value);
+      if (!u) return show('Informe o seu @.');
+      if (mode === 'register' && !Sync.USERNAME.test(u)) return show('Esse @ não vale: use 3 a 30 letras minúsculas, números, ponto ou _.');
+      if (pass.value.length < (mode === 'register' ? 8 : 1)) return show(mode === 'register' ? 'A senha precisa ter pelo menos 8 caracteres.' : 'Informe a senha.');
+      go.disabled = true; go.textContent = mode === 'register' ? 'Criando…' : 'Entrando…';
+      const r = await api.cloud.call({ url, method: 'POST', path: mode === 'register' ? '/v1/register' : '/v1/login', body: { username: u, password: pass.value, name: name.value.trim() } });
+      go.disabled = false; draw();
+      if (!r.ok) return show(r.error);
+      Object.assign(c, { url, token: r.data.token, user: r.data.user });
+      persist(); renderWorkspaceBtn(); cloudStart();
+      close();
+      toast(mode === 'register' ? `Conta criada. Bem-vindo, @${r.data.user.username}!` : `Olá, @${r.data.user.username}!`, 3000);
+      if (then) then();
+    };
+    go.onclick = submit;
+    for (const el of [user, pass, name, server]) el.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+    body.append(title, sub,
+      h('div', { class: 'field' }, h('label', {}, 'Usuário (@)'), h('div', { class: 'at-input' }, h('span', {}, '@'), user)), hint,
+      h('div', { class: 'field' }, h('label', {}, 'Senha'), pass),
+      nameField,
+      h('details', { class: 'acct-server', open: !cloudUrl() }, h('summary', {}, 'Servidor'), h('div', { class: 'field' }, server)),
+      err,
+      h('div', { class: 'modal-actions spread' }, swap, h('div', { class: 'row-gap' }, h('button', { class: 'btn-ghost', onclick: close }, 'Cancelar'), go)));
+    draw();
+    setTimeout(() => user.focus(), 0);
+  });
+}
+
+// Compartilha um workspace local (passa a existir no servidor) e abre a tela de pessoas.
+async function shareWorkspace(w) {
+  if (!loggedIn()) return openAccount({ then: () => shareWorkspace(w) });
+  const data0 = Sync.shareable(wsData(w));
+  const r = await cloudCall('POST', '/v1/workspaces', { name: w.name, description: w.description || '', data: data0 });
+  if (!r.ok) { toast(r.error, 4000); return; }
+  const sw = r.data.workspace;
+  w.shared = { id: sw.id, version: sw.version, base: sw.data, ownerId: sw.ownerId, members: sw.members, invites: [] };
+  persist(); renderWorkspaceBtn();
+  toast(`“${w.name}” agora é compartilhado. Convide alguém pelo @.`, 3500);
+  openShare(w);
+}
+let shareModal = null; // { w, draw }
+function refreshShareModal(w) { if (shareModal && shareModal.w === w && !$('#modal').classList.contains('hidden')) shareModal.draw(); }
+function openShare(w) {
+  if (!w.shared) return shareWorkspace(w);
+  if (!loggedIn()) return openAccount({ then: () => openShare(w) });
+  openModal((body, close) => {
+    const list = h('div', { class: 'ws-list' });
+    const input = h('input', { placeholder: 'usuario', spellcheck: 'false', autocomplete: 'off', maxlength: 31 });
+    const sugg = h('div', { class: 'at-sugg hidden' });
+    const err = h('p', { class: 'ws-err hidden' });
+    const inviteBtn = h('button', { class: 'btn-primary' }, 'Convidar');
+    const draw = () => {
+      list.innerHTML = '';
+      for (const m of w.shared.members || []) {
+        const self = m.userId === me()?.id;
+        const actions = [];
+        if (self && !isOwner(w)) actions.push(h('button', { class: 'btn-ghost sm', onclick: () => leaveShared(w, close) }, 'Sair'));
+        if (!self && isOwner(w)) actions.push(h('button', { class: 'btn-ghost sm', onclick: async () => {
+          if (!(await confirmModal({ title: `Remover @${m.username}?`, sub: `@${m.username} deixa de ver e de editar “${w.name}”. A cópia que já está no computador dele/dela fica só lá.`, ok: 'Remover' }))) return openShare(w);
+          const r = await cloudCall('DELETE', `/v1/workspaces/${w.shared.id}/members/${m.userId}`);
+          if (!r.ok) toast(r.error, 4000);
+          openShare(w);
+        } }, 'Remover'));
+        list.append(h('div', { class: 'ws-row compact' },
+          h('div', { class: 'ws-avatar' }, (m.name || m.username)[0].toUpperCase()),
+          h('div', { class: 'ws-info' },
+            h('div', { class: 'ws-title' }, m.name || '@' + m.username, self ? h('span', { class: 'ws-badge' }, 'você') : null),
+            h('div', { class: 'ws-stats' }, '@' + m.username + ' · ' + (m.role === 'owner' ? 'criou o workspace' : 'pode editar'))),
+          ...actions));
+      }
+      for (const i of w.shared.invites || []) {
+        list.append(h('div', { class: 'ws-row compact pending' },
+          h('div', { class: 'ws-avatar' }, i.username[0].toUpperCase()),
+          h('div', { class: 'ws-info' }, h('div', { class: 'ws-title' }, '@' + i.username), h('div', { class: 'ws-stats' }, 'Convite enviado — aguardando aceitar'))));
+      }
+    };
+    shareModal = { w, draw };
+    let seq = 0;
+    input.addEventListener('input', async () => {
+      err.classList.add('hidden');
+      const q = Sync.normUser(input.value);
+      const my = ++seq;
+      if (q.length < 2) { sugg.classList.add('hidden'); return; }
+      const r = await cloudCall('GET', `/v1/users?q=${encodeURIComponent(q)}`);
+      if (my !== seq) return;
+      const members = new Set((w.shared.members || []).map((m) => m.username));
+      const users = r.ok ? r.data.users.filter((u) => !members.has(u.username)) : [];
+      sugg.innerHTML = '';
+      for (const u of users) sugg.append(h('button', { onclick: () => { input.value = u.username; sugg.classList.add('hidden'); invite(); } }, h('b', {}, '@' + u.username), u.name ? h('span', {}, u.name) : null));
+      sugg.classList.toggle('hidden', !users.length);
+    });
+    const invite = async () => {
+      const u = Sync.normUser(input.value);
+      if (!u) return;
+      inviteBtn.disabled = true;
+      const r = await cloudCall('POST', `/v1/workspaces/${w.shared.id}/invites`, { username: u });
+      inviteBtn.disabled = false;
+      if (!r.ok) { err.textContent = r.error; err.classList.remove('hidden'); return; }
+      w.shared.invites = [...(w.shared.invites || []).filter((i) => i.username !== u), { username: r.data.invite.username }];
+      input.value = ''; sugg.classList.add('hidden'); persist(); draw();
+      toast(`Convite enviado para @${r.data.invite.username}`, 3000);
+    };
+    inviteBtn.onclick = invite;
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') invite(); if (e.key === 'Escape') sugg.classList.add('hidden'); });
+    draw();
+    body.append(
+      h('h2', {}, `Pessoas em “${w.name}”`),
+      h('p', { class: 'sub' }, 'Quem estiver aqui vê e edita coleções, pastas, requisições, ambientes e variáveis globais em tempo real. Valores marcados como segredo (cadeado) não são compartilhados — cada pessoa preenche os seus.'),
+      h('div', { class: 'invite-row' }, h('div', { class: 'at-input grow' }, h('span', {}, '@'), input, sugg), inviteBtn),
+      err,
+      list,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: close }, 'Fechar')));
+    setTimeout(() => input.focus(), 0);
+    // atualiza membros e convites pendentes
+    cloudCall('GET', `/v1/workspaces/${w.shared.id}`).then((r) => {
+      if (r.ok && w.shared) { w.shared.members = r.data.workspace.members; w.shared.invites = r.data.workspace.invites || []; draw(); }
+    });
+  });
+}
+async function leaveShared(w, closeModal) {
+  if (!(await confirmModal({ title: `Sair de “${w.name}”?`, sub: 'Você deixa de receber as mudanças. Fica uma cópia só neste computador.', ok: 'Sair' }))) return;
+  const r = await cloudCall('DELETE', `/v1/workspaces/${w.shared.id}/members/${me().id}`);
+  if (!r.ok && r.status !== 404) { toast(r.error, 4000); return; }
+  detachShared(w, `Você saiu de “${w.name}”. Ficou uma cópia só neste computador.`);
+  closeModal?.();
+}
+// Convite recebido: aceitar cria o workspace aqui e abre.
+function openInvite(inv) {
+  openModal((body, close) => {
+    const accept = h('button', { class: 'btn-primary' }, 'Aceitar e abrir');
+    accept.onclick = async () => {
+      accept.disabled = true; accept.textContent = 'Entrando…';
+      const r = await cloudCall('POST', `/v1/invites/${inv.id}/accept`);
+      cloud.invites = cloud.invites.filter((i) => i.id !== inv.id);
+      renderWorkspaceBtn();
+      if (!r.ok) { close(); toast(r.error, 4000); return; }
+      const sw = r.data.workspace;
+      let w = wsByShared(sw.id);
+      if (!w) {
+        w = { id: uid('ws'), name: sw.name, description: sw.description || '', createdAt: Date.now(),
+          data: { ...Sync.clone(sw.data), history: [], activeEnvId: sw.data.environments?.[0]?.id || '' },
+          shared: { id: sw.id, version: sw.version, base: Sync.clone(sw.data), ownerId: sw.ownerId, members: sw.members, invites: [] } };
+        data.workspaces.push(w);
+      }
+      close();
+      switchWorkspace(w.id, { quiet: true });
+      toast(`Você entrou em “${sw.name}”`, 3000);
+    };
+    body.append(
+      h('h2', {}, `Convite para “${inv.wsName}”`),
+      h('p', { class: 'sub' }, `${inv.from.name || '@' + inv.from.username} (@${inv.from.username}) convidou você para editar junto.${inv.wsDescription ? ' — ' + inv.wsDescription : ''}`),
+      h('p', { class: 'acct-hint' }, 'Ao aceitar, as coleções e os ambientes do workspace aparecem aqui, e as mudanças de todos chegam em tempo real.'),
+      h('div', { class: 'modal-actions' },
+        h('button', { class: 'btn-ghost', onclick: async () => {
+          const r = await cloudCall('POST', `/v1/invites/${inv.id}/decline`);
+          cloud.invites = cloud.invites.filter((i) => i.id !== inv.id); renderWorkspaceBtn(); close();
+          toast(r.ok ? 'Convite recusado' : r.error, 3000);
+        } }, 'Recusar'),
+        accept));
+  });
+}
+
 // ---------- Persistência ----------
 let saveTimer;
 function persist() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => api.save(stripEmpty(data)), 250);
+  scheduleSync();
 }
 function stripEmpty(d) {
   // Remove linhas vazias de tabelas antes de gravar.
@@ -2846,6 +3263,7 @@ function initVarFields() {
   renderEnvSelect();
   renderWorkspaceBtn();
   bind();
+  cloudInit();
   initDivider();
   renderTabs(); renderRequest(); renderResponse(); renderSidebar();
 })();

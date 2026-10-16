@@ -1,0 +1,17 @@
+{
+  "name": "mono-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Servidor do Mono: contas, workspaces compartilhados e tempo real",
+  "main": "index.js",
+  "engines": { "node": ">=20.6" },
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --env-file=.env index.js",
+    "memory": "node -e \"process.env.MONO_DB='memory';require('./index')\"",
+    "test": "node ../test/cloud.test.js"
+  },
+  "dependencies": {
+    "mongodb": "^6.10.0"
+  }
+}

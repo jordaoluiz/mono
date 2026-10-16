@@ -338,7 +338,17 @@ npm.cmd install
 npm.cmd run dev             # http://localhost:8787
 ```
 
-**Publicar** (Render, já configurado em [`render.yaml`](render.yaml)):
+**Publicar no Railway** (recomendado, configurado em [`railway.json`](railway.json) + [`server/Dockerfile`](server/Dockerfile)):
+
+1. No [Railway](https://railway.com), escolha **New Project → Deploy from GitHub repo** e selecione este repositório.
+2. Em **Variables**, adicione `MONGODB_URI` (e, se quiser, `MONGODB_DB=mono`).
+3. Em **Settings → Networking**, clique em **Generate Domain**.
+4. No Atlas, em **Network Access**, libere `0.0.0.0/0`, porque o Railway não tem IP fixo no plano Hobby.
+5. Use o domínio gerado (`https://xxxx.up.railway.app`) no campo **Servidor** do Mono.
+
+Mantenha **1 réplica**: os eventos em tempo real ficam na memória do servidor.
+
+**Publicar no Render** (alternativa, configurado em [`render.yaml`](render.yaml)):
 
 1. No [Render](https://render.com), escolha **New → Blueprint** e aponte para este repositório.
 2. Preencha `MONGODB_URI` quando o Render pedir.

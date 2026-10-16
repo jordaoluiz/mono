@@ -25,5 +25,12 @@ contextBridge.exposeInMainWorld('mono', {
   checkUpdate: () => ipcRenderer.invoke('update:check'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   onUpdate: (cb) => { const fn = (_e, s) => cb(s); ipcRenderer.on('update:status', fn); return () => ipcRenderer.removeListener('update:status', fn); },
+  cloud: {
+    call: (opts) => ipcRenderer.invoke('cloud:call', opts),
+    connect: (opts) => ipcRenderer.invoke('cloud:connect', opts),
+    disconnect: () => ipcRenderer.invoke('cloud:disconnect'),
+    onEvent: (cb) => { const fn = (_e, p) => cb(p); ipcRenderer.on('cloud:event', fn); return () => ipcRenderer.removeListener('cloud:event', fn); },
+    onState: (cb) => { const fn = (_e, p) => cb(p); ipcRenderer.on('cloud:state', fn); return () => ipcRenderer.removeListener('cloud:state', fn); },
+  },
   platform: process.platform,
 });

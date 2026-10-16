@@ -16,6 +16,8 @@
         <button class="ws-btn" id="wsBtn" title="Workspace">
           <svg viewBox="0 0 24 24"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg>
           <span id="wsName">Workspace</span>
+          <span class="ws-people hidden" id="wsPeople" title="Compartilhado"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M15.5 5.2a3.2 3.2 0 0 1 0 5.6M17.5 13.6A5.5 5.5 0 0 1 20.5 19"/></svg><span class="n">0</span><span class="dot"></span></span>
+          <span class="ws-inv hidden" id="wsInvites">0</span>
           <svg class="ws-chev" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>
         </button>
       </div>
@@ -116,6 +118,7 @@
   <script src="../shared/runner.js"></script>
   <script src="../shared/xml.js"></script>
   <script src="../shared/wsdl.js"></script>
+  <script src="../shared/sync.js"></script>
   <script src="ui.js"></script>
   <script src="script-editor.js"></script>
   <script src="var-input.js"></script>

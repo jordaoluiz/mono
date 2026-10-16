@@ -1,0 +1,16 @@
+# Deploy do servidor do Mono no Render (Blueprint). A URI do MongoDB é pedida no painel — nunca fica no Git.
+services:
+  - type: web
+    name: mono-server
+    runtime: node
+    plan: free
+    buildCommand: cd server && npm install --omit=dev
+    startCommand: node server/index.js
+    healthCheckPath: /health
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: MONGODB_DB
+        value: mono
+      - key: NODE_ENV
+        value: production

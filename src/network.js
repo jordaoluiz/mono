@@ -121,4 +121,7 @@ function friendly(e) {
 }
 
 const get = () => current;
-module.exports = { apply, transport, resolveProxy, get, DEFAULTS, setFileReader };
+// Conexão com o servidor do Mono (contas/workspaces): mesma sessão, logo o mesmo proxy.
+const fetchVia = (url, opts) => getSession().fetch(url, opts);
+
+module.exports = { apply, transport, resolveProxy, get, DEFAULTS, setFileReader, fetch: fetchVia };

@@ -519,3 +519,57 @@ body.is-prod .env { border-color: var(--danger); }
 .ws-desc { color: var(--text-2); font-size: var(--fs-sm); margin-top: 1px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ws-stats { color: var(--muted); font-size: var(--fs-xs); margin-top: 2px; }
 .ws-err { color: var(--danger, #e5484d); font-size: var(--fs-sm); margin: 0 0 var(--sp-2); }
+
+/* Workspaces compartilhados e conta */
+.ws-people { display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px 1px 5px; border-radius: 999px; background: var(--hover); color: var(--text-2); font-size: var(--fs-xs); font-weight: var(--fw-medium); }
+.ws-btn .ws-people svg { width: 13px; height: 13px; opacity: .9; }
+.ws-people .dot, .cloud-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex: none; }
+.ws-people.online .dot, .cloud-dot.online { background: var(--success); box-shadow: 0 0 0 2px var(--success-bg); }
+.ws-people.connecting .dot, .cloud-dot.connecting { background: var(--warning, #d29922); }
+.ws-people.offline .dot, .cloud-dot.offline { background: var(--danger); }
+.ws-inv { min-width: 17px; height: 17px; padding: 0 5px; border-radius: 999px; background: var(--danger); color: #fff; font-size: 11px; font-weight: var(--fw-semibold); display: inline-grid; place-items: center; line-height: 1; }
+.ws-mi.acct { gap: 9px; }
+.ws-mi-av { width: 20px; height: 20px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--text); color: var(--bg); font-size: 11px; font-weight: var(--fw-semibold); }
+.ws-mi-av.off { background: var(--hover); color: var(--text-2); }
+.ws-mi-av svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.ws-mi .cloud-dot { margin-left: auto; }
+.ws-mi-shared { margin-left: auto; display: inline-flex; color: var(--muted); }
+.ws-mi-shared svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.ws-mi.invite small { color: var(--muted); font-weight: normal; }
+.ws-mi-check.inv::before { content: ''; display: block; width: 7px; height: 7px; margin: 3px; border-radius: 50%; background: var(--danger); }
+.ws-badge.shared { display: inline-flex; align-items: center; gap: 3px; }
+.ws-badge.shared svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.ws-row.compact { padding: 8px 10px; }
+.ws-row.compact .ws-avatar { width: 30px; height: 30px; border-radius: 50%; }
+.ws-row.pending { border-style: dashed; background: transparent; }
+.ws-row.pending .ws-avatar { background: transparent; border: 1px dashed var(--border-strong); color: var(--muted); }
+.ws-avatar.big { width: 44px; height: 44px; border-radius: 50%; font-size: 18px; background: var(--text); color: var(--bg); }
+.acct-card { display: flex; align-items: center; gap: 12px; padding: 14px; margin: 10px 0 12px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); }
+.acct-name { color: var(--text); font-weight: var(--fw-semibold); }
+.acct-user { color: var(--muted); font-size: var(--fs-sm); }
+.cloud-state { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); font-size: var(--fs-sm); }
+.cloud-state .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.cloud-state.online .dot { background: var(--success); }
+.cloud-state.connecting .dot { background: var(--warning, #d29922); }
+.cloud-state.offline .dot { background: var(--danger); }
+.acct-hint { color: var(--muted); font-size: var(--fs-sm); margin: -6px 0 var(--sp-3); min-height: 1em; }
+.acct-hint.bad { color: var(--danger); }
+.acct-server { margin: 0 0 var(--sp-3); color: var(--muted); font-size: var(--fs-sm); }
+.acct-server summary { cursor: pointer; margin-bottom: 8px; }
+.at-input { position: relative; display: flex; align-items: center; border: 1px solid var(--border); background: var(--surface); border-radius: var(--r-md); padding-left: 10px; }
+.at-input:focus-within { border-color: var(--border-strong); }
+.at-input > span { color: var(--muted); }
+.at-input input { border: 0 !important; background: transparent !important; padding-left: 3px !important; flex: 1; min-width: 0; outline: none; }
+.field .at-input input { padding: var(--sp-2) 10px var(--sp-2) 3px; }
+.invite-row { display: flex; gap: 8px; margin-bottom: var(--sp-3); }
+.invite-row .grow { flex: 1; }
+.invite-row input { padding: var(--sp-2) 10px var(--sp-2) 3px; }
+.invite-row .btn-primary { height: 36px; padding: 0 18px; }
+.at-sugg { position: absolute; left: -1px; right: -1px; top: calc(100% + 4px); z-index: 5; background: var(--bg); border: 1px solid var(--border-strong); border-radius: var(--r-md); box-shadow: var(--shadow); padding: 4px; }
+.at-sugg button { display: flex; gap: 8px; align-items: baseline; width: 100%; text-align: left; border: 0; background: transparent; padding: 7px 9px; border-radius: var(--r-sm); color: var(--text); }
+.at-sugg button:hover { background: var(--hover); }
+.at-sugg button span { color: var(--muted); font-size: var(--fs-sm); }
+.modal-actions.spread { justify-content: space-between; align-items: center; }
+.row-gap { display: flex; gap: var(--sp-2); }
+.linklike { border: 0; background: transparent; color: var(--text-2); text-decoration: underline; text-underline-offset: 3px; padding: 0; }
+.linklike:hover { color: var(--text); }

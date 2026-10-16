@@ -8,6 +8,7 @@ const network = require('./network');
 const certs = require('./certs');
 const xmlsign = require('./xmlsign');
 const updater = require('./updater');
+const { createCloud } = require('./cloud');
 
 // Arquivos que a interface pode mandar numa requisição (form-data, binário, certificados):
 // só os que o usuário escolheu na janela do sistema. Coleções importadas não conseguem apontar para outros arquivos.
@@ -192,6 +193,14 @@ app.whenReady().then(() => {
     nativeTheme.themeSource = name === 'light' ? 'light' : 'dark';
     return true;
   }));
+  // Servidor do Mono (workspaces compartilhados). O app nunca fala direto com o banco.
+  const cloud = createCloud({
+    fetchImpl: (url, opts) => network.fetch(url, opts),
+    emit: (type, payload) => { if (win && !win.isDestroyed()) win.webContents.send('cloud:' + type, payload); },
+  });
+  ipcMain.handle('cloud:call', guard((opts) => cloud.call(opts)));
+  ipcMain.handle('cloud:connect', guard((opts) => { cloud.connect(opts); return true; }));
+  ipcMain.handle('cloud:disconnect', guard(() => { cloud.disconnect(); return true; }));
   ipcMain.handle('crypto:available', guard(() => safeStorage.isEncryptionAvailable()));
   ipcMain.handle('clipboard:write', guard((text) => { clipboard.writeText(String(text)); return true; }));
   protocol.handle('mono-preview', (req) => {
