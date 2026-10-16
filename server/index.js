@@ -22,4 +22,13 @@ const { createApp } = require('./app');
   server.listen(port, () => console.log(`[mono-server] ouvindo na porta ${port} · banco: ${db.kind}`));
   const stop = () => { server.closeStreams(); server.close(() => db.close().finally(() => process.exit(0))); setTimeout(() => process.exit(0), 5000).unref(); };
   process.on('SIGTERM', stop); process.on('SIGINT', stop);
-})().catch((e) => { console.error('[mono-server] não iniciou:', e.message); process.exit(1); });
+})().catch((e) => {
+  const msg = String((e && e.message) || e);
+  console.error('[mono-server] não iniciou:', msg);
+  if (/alert internal error|alert number 80|Server selection timed out|ECONNREFUSED|ETIMEDOUT/i.test(msg)) {
+    console.error('[mono-server] O MongoDB Atlas recusou a conexão. Em Network Access, libere o IP deste servidor (no Railway: 0.0.0.0/0).');
+  } else if (/bad auth|Authentication failed/i.test(msg)) {
+    console.error('[mono-server] Usuário ou senha do MongoDB incorretos na MONGODB_URI.');
+  }
+  process.exit(1);
+});

@@ -338,13 +338,13 @@ npm.cmd install
 npm.cmd run dev             # http://localhost:8787
 ```
 
-**Publicar no Railway** (recomendado, configurado em [`railway.json`](railway.json) + [`server/Dockerfile`](server/Dockerfile)):
+**Publicar no Railway** (recomendado, configurado em [`railway.json`](railway.json) + [`Dockerfile`](Dockerfile)):
 
 1. No [Railway](https://railway.com), escolha **New Project → Deploy from GitHub repo** e selecione este repositório.
 2. Em **Variables**, adicione `MONGODB_URI` (e, se quiser, `MONGODB_DB=mono`).
 3. Em **Settings → Networking**, clique em **Generate Domain**.
 4. No Atlas, em **Network Access**, libere `0.0.0.0/0`, porque o Railway não tem IP fixo no plano Hobby.
-5. Use o domínio gerado (`https://xxxx.up.railway.app`) no campo **Servidor** do Mono.
+5. Coloque o domínio gerado em `MONO_CLOUD_URL` (`src/renderer/app.js`). O servidor oficial já está configurado: `https://mono-server-production.up.railway.app`.
 
 Mantenha **1 réplica**: os eventos em tempo real ficam na memória do servidor.
 

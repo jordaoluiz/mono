@@ -305,10 +305,10 @@ function openWorkspaces() {
 // { id, version, base, ownerId, members } — `base` é a última versão confirmada pelo servidor; a diferença
 // entre ela e o estado atual vira operações enviadas a cada mudança. Mudanças dos colegas chegam por eventos.
 const Sync = window.MonoSync;
-const MONO_CLOUD_URL = ''; // endereço padrão do servidor (preenchido quando o servidor estiver no ar)
+const MONO_CLOUD_URL = 'https://mono-server-production.up.railway.app'; // servidor oficial do Mono (Railway)
 const cloud = { state: 'off', invites: [], clientId: uid('cli'), timer: null, busy: new Set(), again: new Set(), buffer: new Map(), own: new Map(), gapTimer: new Map() };
 const cloudCfg = () => { const s = (data.settings ||= {}); return (s.cloud ||= { url: MONO_CLOUD_URL, token: '', user: null }); };
-const cloudUrl = () => cloudCfg().url || MONO_CLOUD_URL;
+const cloudUrl = () => MONO_CLOUD_URL || cloudCfg().url;
 const loggedIn = () => !!(cloudCfg().token && cloudCfg().user && cloudUrl());
 const me = () => cloudCfg().user;
 const sharedWs = () => data.workspaces.filter((w) => w.shared);
@@ -477,7 +477,7 @@ function openAccount({ then = null } = {}) {
           h('div', { class: 'ws-avatar big' }, (me().name || me().username)[0].toUpperCase()),
           h('div', {}, h('div', { class: 'acct-name' }, me().name || me().username), h('div', { class: 'acct-user' }, '@' + me().username)),
           h('span', { class: 'cloud-state ' + cloud.state }, h('span', { class: 'dot' }), st)),
-        h('p', { class: 'sub' }, `Servidor: ${cloudUrl()} · ${plural(sharedWs().length, 'workspace compartilhado', 'workspaces compartilhados')}`),
+        h('p', { class: 'sub' }, plural(sharedWs().length, 'workspace compartilhado', 'workspaces compartilhados')),
         h('div', { class: 'modal-actions' },
           h('button', { class: 'btn-ghost', onclick: async () => { await cloudCall('POST', '/v1/logout'); cloudLoggedOut(); close(); toast('Você saiu da conta. Os workspaces continuam aqui, sem sincronizar.', 4000); } }, 'Sair da conta'),
           h('button', { class: 'btn-primary', onclick: close }, 'Fechar')));
@@ -514,7 +514,7 @@ function openAccount({ then = null } = {}) {
     swap.onclick = () => { mode = mode === 'login' ? 'register' : 'login'; draw(); user.focus(); };
     const submit = async () => {
       const show = (m) => { err.textContent = m; err.classList.remove('hidden'); };
-      const url = server.value.trim();
+      const url = MONO_CLOUD_URL || server.value.trim();
       if (!url) return show('Informe o endereço do servidor do Mono.');
       const u = Sync.normUser(user.value);
       if (!u) return show('Informe o seu @.');
@@ -536,7 +536,7 @@ function openAccount({ then = null } = {}) {
       h('div', { class: 'field' }, h('label', {}, 'Usuário (@)'), h('div', { class: 'at-input' }, h('span', {}, '@'), user)), hint,
       h('div', { class: 'field' }, h('label', {}, 'Senha'), pass),
       nameField,
-      h('details', { class: 'acct-server', open: !cloudUrl() }, h('summary', {}, 'Servidor'), h('div', { class: 'field' }, server)),
+      MONO_CLOUD_URL ? null : h('details', { class: 'acct-server', open: !cloudUrl() }, h('summary', {}, 'Servidor'), h('div', { class: 'field' }, server)),
       err,
       h('div', { class: 'modal-actions spread' }, swap, h('div', { class: 'row-gap' }, h('button', { class: 'btn-ghost', onclick: close }, 'Cancelar'), go)));
     draw();
