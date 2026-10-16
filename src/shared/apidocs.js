@@ -282,6 +282,7 @@
         auth, pre: e.pre || '', tests, folderId: folderFor(e.folder || e.group), description: e.description || '',
         ...(e.contract ? { contract: { ...e.contract, colId } } : {}),
         ...(e.soap ? { soap: e.soap } : {}),
+        ...(e.examples && e.examples.length ? { examples: e.examples.map((x) => ({ ...x, id: uid('ex') })) } : {}),
       });
     }
     for (const fm of model.folderMeta || []) {

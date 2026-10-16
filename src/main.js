@@ -9,6 +9,8 @@ const certs = require('./certs');
 const xmlsign = require('./xmlsign');
 const updater = require('./updater');
 const { createCloud } = require('./cloud');
+const { createMock } = require('./mock');
+const { createRealtime } = require('./realtime');
 
 // Arquivos que a interface pode mandar numa requisição (form-data, binário, certificados):
 // só os que o usuário escolheu na janela do sistema. Coleções importadas não conseguem apontar para outros arquivos.
@@ -198,9 +200,25 @@ app.whenReady().then(() => {
     fetchImpl: (url, opts) => network.fetch(url, opts),
     emit: (type, payload) => { if (win && !win.isDestroyed()) win.webContents.send('cloud:' + type, payload); },
   });
+  // Mock server local (exemplos salvos). Só escuta em 127.0.0.1.
+  const mock = createMock({ onHit: (hit) => { if (win && !win.isDestroyed()) win.webContents.send('mock:hit', hit); } });
+  ipcMain.handle('mock:start', guard((opts) => mock.start(opts)));
+  ipcMain.handle('mock:update', guard((opts) => mock.update(opts)));
+  ipcMain.handle('mock:stop', guard(() => mock.stop()));
+  ipcMain.handle('mock:status', guard(() => mock.status()));
+  // WebSocket e SSE: a interface manda a requisição; aqui ela é montada (variáveis, auth) e a conexão fica aberta.
+  const realtime = createRealtime({ emit: (e) => { if (win && !win.isDestroyed()) win.webContents.send('rt:event', e); }, ...network.realtimeOptions() });
+  ipcMain.handle('rt:connect', guard(({ id, kind, req, vars }) => {
+    const built = http.buildRequest(req, vars || {}, { readFile: readAllowed });
+    return realtime.connect({ id: String(id), kind: kind === 'sse' ? 'sse' : 'ws', built });
+  }));
+  ipcMain.handle('rt:send', guard(({ id, data, binary }) => realtime.send({ id: String(id), data, binary: !!binary })));
+  ipcMain.handle('rt:close', guard(({ id }) => realtime.close({ id: String(id) })));
+  app.on('before-quit', () => realtime.closeAll());
   ipcMain.handle('cloud:call', guard((opts) => cloud.call(opts)));
   ipcMain.handle('cloud:connect', guard((opts) => { cloud.connect(opts); return true; }));
   ipcMain.handle('cloud:disconnect', guard(() => { cloud.disconnect(); return true; }));
+  ipcMain.handle('cloud:defaultUrl', guard(() => (DEV || !app.isPackaged ? process.env.MONO_SERVER || '' : '')));
   ipcMain.handle('crypto:available', guard(() => safeStorage.isEncryptionAvailable()));
   ipcMain.handle('clipboard:write', guard((text) => { clipboard.writeText(String(text)); return true; }));
   protocol.handle('mono-preview', (req) => {

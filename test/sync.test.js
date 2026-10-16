@@ -65,4 +65,26 @@ for (const bad of ['ab', '.luiz', 'luiz.', 'Luiz', 'lu iz', 'luiz-j', 'a'.repeat
 assert.strictEqual(S.normUser(' @Luiz.Jordao '), 'luiz.jordao');
 assert.ok(S.describe(ops, cur).length > 3);
 
+// 8) Desfazer: aplicar o inverso volta exatamente ao estado anterior (inclusive exclusões e ordem).
+{
+  const before = S.shareable(base);
+  const after = S.clone(cur);
+  after.collections = after.collections.filter((c) => c.id !== 'c2'); // excluir coleção
+  after.environments = []; // excluir ambiente
+  after.monitors = [{ id: 'm1', name: 'SEFAZ', every: 15 }];
+  const ops2 = S.diff(before, S.shareable(after));
+  const applied = S.applyOps(S.clone(before), ops2);
+  const inv = S.inverseOps(before, ops2);
+  assert.strictEqual(S.validOps(inv), null);
+  const back = S.applyOps(S.clone(applied), inv);
+  assert.deepStrictEqual(back, before);
+  const items = S.itemsOf(ops2, before);
+  assert.ok(items.some((i) => i.t === 'col' && i.del && i.name === 'Fiscal'), 'nome de item excluído vem do estado anterior');
+  assert.ok(items.some((i) => i.t === 'req' && i.id === 'r2'));
+  // inverso de uma exclusão de requisição recoloca na mesma posição
+  const del = [{ t: 'reqDel', col: 'c1', id: 'r2' }];
+  const b2 = S.applyOps(S.applyOps(S.clone(before), del), S.inverseOps(before, del));
+  assert.deepStrictEqual(b2.collections[0].requests.map((r) => r.id), ['r1', 'r2', 'r3']);
+}
+
 console.log('ok — sincronização de workspaces passou');

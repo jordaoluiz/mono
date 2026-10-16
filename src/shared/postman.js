@@ -54,6 +54,7 @@
         if (b && b.mode === 'urlencoded') body = { type: 'form', raw: '', form: (b.urlencoded || []).map((f) => ({ key: f.key, value: f.value ?? '', enabled: !f.disabled })) };
         // Arquivos: o caminho de outro computador não é usado — o usuário escolhe o arquivo de novo.
         if (b && b.mode === 'formdata') body = { type: 'multipart', raw: '', form: [], multipart: (b.formdata || []).map((f) => (f.type === 'file' ? { key: f.key, kind: 'file', file: null, fileName: String([].concat(f.src || '')[0] || '').split(/[\\/]/).pop(), enabled: !f.disabled } : { key: f.key, kind: 'text', value: f.value ?? '', enabled: !f.disabled })) };
+        if (b && b.mode === 'graphql') body = { type: 'graphql', raw: '', form: [], graphql: { query: (b.graphql && b.graphql.query) || '', variables: (b.graphql && (typeof b.graphql.variables === 'string' ? b.graphql.variables : b.graphql.variables ? JSON.stringify(b.graphql.variables, null, 2) : '')) || '' } };
         if (b && b.mode === 'file') body = { type: 'binary', raw: '', form: [], file: { path: null, name: String((b.file && b.file.src) || '').split(/[\\/]/).pop() } };
         endpoints.push({
           name: it.name || `${req.method} ${url}`, folder: path.length ? path : null, method: (req.method || 'GET').toUpperCase(), url,
@@ -62,6 +63,11 @@
           params: query, body, auth: authFromPostman(req.auth) || null, description: desc(req.description || it.description),
           returnsToken: /token|auth|login/i.test(it.name || '') && req.method === 'POST', tokenField: null,
           pre: evCode(it.event, 'prerequest'), tests: evCode(it.event, 'test'),
+          examples: (it.response || []).filter((x) => x && x.code).map((x) => {
+            const hs = (x.header || []).filter((h) => h && h.key).map((h) => ({ key: h.key, value: h.value ?? '' }));
+            const ct = (hs.find((h) => /^content-type$/i.test(h.key)) || {}).value || (x._postman_previewlanguage === 'json' ? 'application/json' : x._postman_previewlanguage === 'xml' ? 'application/xml' : '');
+            return { name: x.name || String(x.code), status: Number(x.code), statusText: x.status || '', contentType: ct, headers: hs, body: x.body == null ? '' : String(x.body) };
+          }),
         });
       }
     };
@@ -93,6 +99,7 @@
     const body = !r.body || r.body.type === 'none' ? undefined
       : r.body.type === 'multipart' ? { mode: 'formdata', formdata: (r.body.multipart || []).filter((f) => f.key).map((f) => (f.kind === 'file' ? { key: f.key, type: 'file', src: f.file || f.fileName || '' } : { key: f.key, value: f.value, type: 'text' })).map((f, i) => ((r.body.multipart || []).filter((x) => x.key)[i].enabled === false ? { ...f, disabled: true } : f)) }
       : r.body.type === 'binary' ? { mode: 'file', file: { src: (r.body.file && (r.body.file.path || r.body.file.name)) || '' } }
+      : r.body.type === 'graphql' ? { mode: 'graphql', graphql: { query: (r.body.graphql && r.body.graphql.query) || '', variables: (r.body.graphql && r.body.graphql.variables) || '' } }
       : r.body.type === 'form' ? { mode: 'urlencoded', urlencoded: (r.body.form || []).filter((f) => f.key).map((f) => ({ key: f.key, value: f.value, disabled: f.enabled === false || undefined })) }
       : { mode: 'raw', raw: r.body.raw || '', options: { raw: { language: r.body.type === 'json' ? 'json' : r.body.type === 'xml' ? 'xml' : 'text' } } };
     const item = {
@@ -105,6 +112,7 @@
       },
     };
     Object.assign(item, toEvents(r));
+    if ((r.examples || []).length) item.response = r.examples.map((x) => ({ name: x.name, code: Number(x.status) || 200, status: x.statusText || '', header: [...(x.headers || []), ...(x.contentType && !(x.headers || []).some((h) => /^content-type$/i.test(h.key)) ? [{ key: 'Content-Type', value: x.contentType }] : [])], body: x.body || '', _postman_previewlanguage: /json/i.test(x.contentType) ? 'json' : /xml/i.test(x.contentType) ? 'xml' : 'text', originalRequest: item.request }));
     return item;
   }
   function toPostman(col, vars = []) {

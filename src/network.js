@@ -124,4 +124,20 @@ const get = () => current;
 // Conexão com o servidor do Mono (contas/workspaces): mesma sessão, logo o mesmo proxy.
 const fetchVia = (url, opts) => getSession().fetch(url, opts);
 
-module.exports = { apply, transport, resolveProxy, get, DEFAULTS, setFileReader, fetch: fetchVia };
+// Opções para WebSocket/SSE (realtime.js): mesmo proxy, verificação SSL e certificado A1 das requisições.
+function realtimeOptions() {
+  return {
+    resolveProxy: (url) => (current.proxy.mode === 'none' ? Promise.resolve('DIRECT') : getSession().resolveProxy(url)),
+    proxyAuth: () => (current.proxy.auth ? { username: current.proxy.username, password: current.proxy.password } : null),
+    sslVerify: () => current.request.sslVerify !== false,
+    clientCert: (url) => {
+      const cert = certs.certFor(current.certs, url);
+      if (!cert || !readFile) return null;
+      const pair = certs.keyPair(readFile(cert.path), cert.passphrase || '');
+      return { key: pair.key, cert: pair.cert, ...(cert.caPath ? { ca: certs.toPem(readFile(cert.caPath)) } : {}) };
+    },
+    fetchImpl: fetchVia,
+  };
+}
+
+module.exports = { apply, transport, resolveProxy, get, DEFAULTS, setFileReader, fetch: fetchVia, realtimeOptions };

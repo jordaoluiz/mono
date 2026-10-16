@@ -27,6 +27,7 @@
       })),
       environments: (d.environments || []).map((e) => ({ ...clone(e), vars: hideSecrets(e.vars) })),
       globals: { ...clone(d.globals || {}), vars: hideSecrets((d.globals || {}).vars) },
+      monitors: (d.monitors || []).map((m) => clone(m)),
     };
   }
 
@@ -65,6 +66,9 @@
       up: (v) => ({ t: 'env', id: v.id, v }), del: (id) => ({ t: 'envDel', id }), order: (list) => ({ t: 'envOrder', ids: list }),
     }));
     if (!same(base.globals, cur.globals)) ops.push({ t: 'globals', v: cur.globals });
+    ops.push(...diffList(base.monitors || [], cur.monitors || [], {
+      up: (v) => ({ t: 'mon', id: v.id, v }), del: (id) => ({ t: 'monDel', id }), order: (list) => ({ t: 'monOrder', ids: list }),
+    }));
     return ops;
   }
 
@@ -89,7 +93,7 @@
 
   // Aplica as operações em `d` (estado do app ou documento do servidor) e devolve `d`.
   function applyOps(d, ops) {
-    d.collections ||= []; d.environments ||= []; d.globals ||= { vars: [] };
+    d.collections ||= []; d.environments ||= []; d.globals ||= { vars: [] }; d.monitors ||= [];
     const col = (id) => d.collections.find((c) => c.id === id);
     for (const op of ops || []) {
       const v = clone(op.v);
@@ -107,6 +111,9 @@
         case 'envDel': remove(d.environments, op.id); break;
         case 'envOrder': reorder(d.environments, op.ids); break;
         case 'globals': d.globals = { ...v, vars: keepSecrets(d.globals && d.globals.vars, v && v.vars) }; break;
+        case 'mon': upsert(d.monitors, v, (old, n) => n); break;
+        case 'monDel': remove(d.monitors, op.id); break;
+        case 'monOrder': reorder(d.monitors, op.ids); break;
         default: break;
       }
     }
@@ -114,7 +121,7 @@
   }
 
   // Validação feita pelo servidor antes de gravar (o app nunca manda algo diferente disso).
-  const TYPES = new Set(['col', 'colDel', 'colOrder', 'fold', 'foldDel', 'foldOrder', 'req', 'reqDel', 'reqOrder', 'env', 'envDel', 'envOrder', 'globals']);
+  const TYPES = new Set(['col', 'colDel', 'colOrder', 'fold', 'foldDel', 'foldOrder', 'req', 'reqDel', 'reqOrder', 'env', 'envDel', 'envOrder', 'globals', 'mon', 'monDel', 'monOrder']);
   const okId = (s) => typeof s === 'string' && s.length > 0 && s.length <= 120;
   function validOps(ops) {
     if (!Array.isArray(ops) || ops.length > 5000) return 'Lista de alterações inválida.';
@@ -123,7 +130,7 @@
       if (/Order$/.test(op.t)) { if (!Array.isArray(op.ids) || !op.ids.every(okId)) return 'Ordem inválida.'; }
       else if (op.t !== 'globals' && !okId(op.id)) return 'Identificador inválido.';
       if (['fold', 'foldDel', 'foldOrder', 'req', 'reqDel', 'reqOrder'].includes(op.t) && !okId(op.col)) return 'Coleção inválida.';
-      if (['col', 'fold', 'req', 'env', 'globals'].includes(op.t)) {
+      if (['col', 'fold', 'req', 'env', 'globals', 'mon'].includes(op.t)) {
         if (!op.v || typeof op.v !== 'object' || Array.isArray(op.v)) return 'Conteúdo inválido.';
         if (op.t !== 'globals' && op.v.id !== op.id) return 'Identificador não confere.';
       }
@@ -131,25 +138,125 @@
     return null;
   }
 
-  // Descrição curta para o aviso "@fulano alterou …".
-  function describe(ops, data) {
-    const names = [];
-    const colName = (id) => ((data && data.collections) || []).find((c) => c.id === id)?.name;
+  // Frase curta do que mudou, com o verbo: "alterou Get Booking", "excluiu Consulta e criou Nova". `before` = estado anterior.
+  function describe(ops, before) {
+    const find = (list, id) => (list || []).find((x) => x.id === id);
+    const colOf = (id) => find(before && before.collections, id);
+    const prevOf = (op) => {
+      const kind = op.t.replace(/Del$/, '');
+      if (kind === 'col') return colOf(op.id);
+      if (kind === 'req') return find(colOf(op.col) && colOf(op.col).requests, op.id);
+      if (kind === 'fold') return find(colOf(op.col) && colOf(op.col).folders, op.id);
+      if (kind === 'env') return find(before && before.environments, op.id);
+      if (kind === 'mon') return find(before && before.monitors, op.id);
+      return null;
+    };
+    const label = { col: 'a coleção', fold: 'a pasta', req: '', env: 'o ambiente', mon: 'o monitor' };
+    const phrases = [];
     for (const op of ops || []) {
-      if (op.t === 'req') names.push(op.v.name || 'requisição');
-      else if (op.t === 'col') names.push(op.v.name || 'coleção');
-      else if (op.t === 'fold') names.push(op.v.name || 'pasta');
-      else if (op.t === 'env') names.push(`ambiente ${op.v.name || ''}`.trim());
-      else if (op.t === 'globals') names.push('variáveis globais');
-      else if (/Del$/.test(op.t)) names.push(op.t === 'colDel' ? 'uma coleção' : op.t === 'envDel' ? 'um ambiente' : `item em ${colName(op.col) || 'coleção'}`);
+      if (/Order$/.test(op.t)) continue;
+      if (op.t === 'globals') { phrases.push(['alterou', 'as variáveis globais']); continue; }
+      const kind = op.t.replace(/Del$/, '');
+      const prev = before ? prevOf(op) : null;
+      const name = (op.v && op.v.name) || (prev && prev.name) || 'item';
+      const verb = /Del$/.test(op.t) ? 'excluiu' : before && !prev ? 'criou' : 'alterou';
+      phrases.push([verb, `${label[kind] ? label[kind] + ' ' : ''}${name}`.trim()]);
     }
-    const uniq = [...new Set(names)];
-    if (!uniq.length) return 'reorganizou itens';
-    return uniq.length <= 2 ? uniq.join(' e ') : `${uniq.slice(0, 2).join(', ')} e mais ${uniq.length - 2}`;
+    if (!phrases.length) return 'reorganizou itens';
+    const seen = new Set();
+    const uniq = phrases.filter(([v, n]) => { const k = v + n; if (seen.has(k)) return false; seen.add(k); return true; });
+    const byVerb = [];
+    for (const [v, n] of uniq) { const g = byVerb.find((x) => x.v === v); if (g) g.n.push(n); else byVerb.push({ v, n: [n] }); }
+    const join = (l) => (l.length <= 2 ? l.join(' e ') : `${l.slice(0, 2).join(', ')} e mais ${l.length - 2}`);
+    return byVerb.map((g) => `${g.v} ${join(g.n)}`).join(', ');
+  }
+
+  // Operações que desfazem `ops` quando aplicadas depois delas. `before` é o estado anterior (formato shareable).
+  function inverseOps(before, ops) {
+    const work = clone(before || shareable({}));
+    work.collections ||= []; work.environments ||= []; work.globals ||= { vars: [] }; work.monitors ||= [];
+    const groups = [];
+    const find = (list, id) => (list || []).find((x) => x.id === id);
+    const col = (id) => find(work.collections, id);
+    for (const op of ops || []) {
+      const g = [];
+      switch (op.t) {
+        case 'col': { const c = col(op.id); g.push(c ? { t: 'col', id: op.id, v: strip(c, ['requests', 'folders']) } : { t: 'colDel', id: op.id }); break; }
+        case 'colDel': {
+          const c = col(op.id);
+          if (c) {
+            g.push({ t: 'col', id: c.id, v: strip(c, ['requests', 'folders']) });
+            for (const f of c.folders || []) g.push({ t: 'fold', col: c.id, id: f.id, v: clone(f) });
+            for (const r of c.requests || []) g.push({ t: 'req', col: c.id, id: r.id, v: clone(r) });
+            g.push({ t: 'colOrder', ids: ids(work.collections) });
+          }
+          break;
+        }
+        case 'colOrder': g.push({ t: 'colOrder', ids: ids(work.collections) }); break;
+        case 'fold': case 'req': {
+          const c = col(op.col); if (!c) break;
+          const list = op.t === 'fold' ? c.folders : c.requests;
+          const old = find(list, op.id);
+          g.push(old ? { t: op.t, col: op.col, id: op.id, v: clone(old) } : { t: op.t + 'Del', col: op.col, id: op.id });
+          break;
+        }
+        case 'foldDel': case 'reqDel': {
+          const c = col(op.col); if (!c) break;
+          const kind = op.t === 'foldDel' ? 'fold' : 'req';
+          const list = kind === 'fold' ? c.folders : c.requests;
+          const old = find(list, op.id);
+          if (old) g.push({ t: kind, col: op.col, id: op.id, v: clone(old) }, { t: kind + 'Order', col: op.col, ids: ids(list) });
+          break;
+        }
+        case 'foldOrder': case 'reqOrder': { const c = col(op.col); if (c) g.push({ t: op.t, col: op.col, ids: ids(op.t === 'foldOrder' ? c.folders : c.requests) }); break; }
+        case 'env': case 'mon': {
+          const list = op.t === 'env' ? work.environments : work.monitors;
+          const old = find(list, op.id);
+          g.push(old ? { t: op.t, id: op.id, v: clone(old) } : { t: op.t + 'Del', id: op.id });
+          break;
+        }
+        case 'envDel': case 'monDel': {
+          const kind = op.t.slice(0, 3);
+          const list = kind === 'env' ? work.environments : work.monitors;
+          const old = find(list, op.id);
+          if (old) g.push({ t: kind, id: op.id, v: clone(old) }, { t: kind + 'Order', ids: ids(list) });
+          break;
+        }
+        case 'envOrder': g.push({ t: 'envOrder', ids: ids(work.environments) }); break;
+        case 'monOrder': g.push({ t: 'monOrder', ids: ids(work.monitors) }); break;
+        case 'globals': g.push({ t: 'globals', v: clone(work.globals) }); break;
+        default: break;
+      }
+      groups.push(g);
+      applyOps(work, [op]);
+    }
+    return groups.reverse().flat();
+  }
+
+  // Itens tocados por uma alteração (para o histórico por requisição): [{ t, col, id, name }].
+  function itemsOf(ops, before) {
+    const out = [], seen = new Set();
+    const find = (list, id) => (list || []).find((x) => x.id === id);
+    for (const op of ops || []) {
+      if (/Order$/.test(op.t)) continue;
+      const kind = op.t.replace(/Del$/, '');
+      const key = kind + ':' + (op.col || '') + ':' + (op.id || '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      let name = op.v && op.v.name;
+      if (!name && before) {
+        const c = find(before.collections, kind === 'col' ? op.id : op.col);
+        const prev = kind === 'col' ? c : kind === 'req' ? find(c && c.requests, op.id) : kind === 'fold' ? find(c && c.folders, op.id)
+          : kind === 'env' ? find(before.environments, op.id) : kind === 'mon' ? find(before.monitors, op.id) : null;
+        name = prev && prev.name;
+      }
+      out.push({ t: kind, del: /Del$/.test(op.t), col: op.col || null, id: op.id || null, name: name || (kind === 'globals' ? 'variáveis globais' : '') });
+    }
+    return out;
   }
 
   const USERNAME = /^[a-z0-9](?:[a-z0-9._]{1,28})[a-z0-9]$/;
   const normUser = (s) => String(s || '').trim().replace(/^@/, '').toLowerCase();
 
-  return { shareable, diff, applyOps, validOps, describe, USERNAME, normUser, clone };
+  return { shareable, diff, applyOps, validOps, describe, inverseOps, itemsOf, USERNAME, normUser, clone };
 });

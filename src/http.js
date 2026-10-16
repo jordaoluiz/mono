@@ -25,6 +25,15 @@ const baseName = (p) => String(p || '').split(/[\\/]/).pop();
 // SOAP 1.2 pede application/soap+xml; SOAP 1.1 e XML comum usam text/xml.
 const xmlContentType = (raw) => (/http:\/\/www\.w3\.org\/2003\/05\/soap-envelope/.test(raw) ? 'application/soap+xml; charset=utf-8' : 'text/xml; charset=utf-8');
 
+// GraphQL vai como JSON { query, variables, operationName }.
+function graphqlPayload(b, v = (s) => s) {
+  const g = b.graphql || {};
+  let variables;
+  const vs = String(v(g.variables || '')).trim();
+  if (vs) { try { variables = JSON.parse(vs); } catch (e) { throw new Error('As variáveis do GraphQL não são um JSON válido: ' + e.message); } }
+  return JSON.stringify({ query: v(g.query || ''), ...(variables ? { variables } : {}), ...(g.operationName ? { operationName: g.operationName } : {}) });
+}
+
 // opts.readFile(path) → Buffer: lê arquivos de form-data/binário (o processo principal só libera arquivos escolhidos pelo usuário).
 function buildRequest(req, vars = {}, opts = {}) {
   const v = (s) => interpolate(s, vars);
@@ -69,6 +78,9 @@ function buildRequest(req, vars = {}, opts = {}) {
     } else if (b.type === 'xml' && b.raw) {
       body = v(b.raw);
       if (!hasHeader('content-type')) headers['Content-Type'] = xmlContentType(body);
+    } else if (b.type === 'graphql') {
+      body = graphqlPayload(b, v);
+      if (!hasHeader('content-type')) headers['Content-Type'] = 'application/json';
     } else if (b.type === 'form') {
       const form = new URLSearchParams();
       for (const p of enabledPairs(b.form)) form.append(v(p.key), v(p.value ?? ''));
@@ -163,4 +175,4 @@ function toCurl(req, vars = {}) {
   return parts.join(' \\\n');
 }
 
-module.exports = { interpolate, buildRequest, send, toCurl, fetchTransport, mimeOf, xmlContentType };
+module.exports = { graphqlPayload, interpolate, buildRequest, send, toCurl, fetchTransport, mimeOf, xmlContentType };

@@ -9,11 +9,12 @@ const toDoc = (o) => { const { id, ...rest } = o; return { _id: id, ...rest }; }
 // O conteúdo do workspace vai como texto JSON: coleções importadas podem ter chaves como "$ref" e "a.b",
 // que o MongoDB restringe em nomes de campo. Nada precisa ser consultado lá dentro.
 const packWs = (w) => { const { data, ...rest } = w; return { ...rest, dataJson: JSON.stringify(data || {}) }; };
+const unpackChange = (d) => { if (!d) return null; const { opsJson, inverseJson, ...rest } = fromDoc(d); return { ...rest, ops: opsJson ? JSON.parse(opsJson) : [], inverse: inverseJson ? JSON.parse(inverseJson) : [] }; };
 const unpackWs = (d) => { if (!d) return null; const { dataJson, ...rest } = d; return { ...rest, data: dataJson ? JSON.parse(dataJson) : {} }; };
 
 function createMongoDb(uri, dbName = 'mono') {
   const client = new MongoClient(uri, { appName: 'mono-server', maxPoolSize: 20 });
-  let users, sessions, workspaces, invites;
+  let users, sessions, workspaces, invites, changes, comments, monitorRuns;
   return {
     kind: 'MongoDB',
     async init() {
@@ -23,7 +24,15 @@ function createMongoDb(uri, dbName = 'mono') {
       sessions = db.collection('sessions');
       workspaces = db.collection('workspaces');
       invites = db.collection('invites');
+      changes = db.collection('changes');
+      comments = db.collection('comments');
+      monitorRuns = db.collection('monitorRuns');
       await Promise.all([
+        changes.createIndex({ wsId: 1, version: -1 }),
+        changes.createIndex({ wsId: 1, 'items.id': 1 }),
+        comments.createIndex({ wsId: 1, at: 1 }),
+        monitorRuns.createIndex({ wsId: 1, at: -1 }),
+        monitorRuns.createIndex({ wsId: 1, monitorId: 1, at: -1 }),
         users.createIndex({ username: 1 }, { unique: true }),
         sessions.createIndex({ tokenHash: 1 }, { unique: true }),
         sessions.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 }),
@@ -70,6 +79,38 @@ function createMongoDb(uri, dbName = 'mono') {
     async inviteById(id) { return fromDoc(await invites.findOne({ _id: id })); },
     async setInviteStatus(id, status) { await invites.updateOne({ _id: id }, { $set: { status, answeredAt: new Date().toISOString() } }); },
     async deleteInvitesOfWorkspace(wsId) { await invites.deleteMany({ wsId }); },
+    async setMemberRole(id, userId, role) { await workspaces.updateOne({ _id: id, 'members.userId': userId }, { $set: { 'members.$.role': role } }); },
+    // histórico (operações guardadas como texto, pelo mesmo motivo do conteúdo do workspace)
+    async addChange(c) { const { ops, inverse, ...rest } = c; await changes.insertOne(toDoc({ ...rest, opsJson: JSON.stringify(ops), inverseJson: JSON.stringify(inverse) })); },
+    async listChanges(wsId, { limit = 100, before = Infinity, itemId = null } = {}) {
+      const q = { wsId, ...(Number.isFinite(before) ? { version: { $lt: before } } : {}), ...(itemId ? { 'items.id': itemId } : {}) };
+      return (await changes.find(q).sort({ version: -1 }).limit(limit).toArray()).map(unpackChange);
+    },
+    async changeById(id) { return unpackChange(await changes.findOne({ _id: id })); },
+    async changesAfter(wsId, version) {
+      return (await changes.find({ wsId, version: { $gt: version } }, { projection: { opsJson: 0, inverseJson: 0 } }).toArray()).map(fromDoc);
+    },
+    async markUndone(id, undoneBy) { await changes.updateOne({ _id: id }, { $set: { undoneBy } }); },
+    async pruneChanges(wsId, keep) {
+      const old = await changes.find({ wsId }, { projection: { version: 1 } }).sort({ version: -1 }).skip(keep).limit(1).toArray();
+      if (old.length) await changes.deleteMany({ wsId, version: { $lte: old[0].version } });
+    },
+    async deleteChangesOfWorkspace(wsId) { await changes.deleteMany({ wsId }); },
+    // comentários
+    async addComment(c) { await comments.insertOne(toDoc(c)); },
+    async listComments(wsId) { return (await comments.find({ wsId }).sort({ at: 1 }).limit(5000).toArray()).map(fromDoc); },
+    async commentById(id) { return fromDoc(await comments.findOne({ _id: id })); },
+    async updateComment(id, fields) { await comments.updateOne({ _id: id }, { $set: fields }); },
+    async deleteComment(id) { await comments.deleteOne({ _id: id }); },
+    async deleteCommentsOfWorkspace(wsId) { await comments.deleteMany({ wsId }); },
+    // resultados de monitores
+    async addMonitorRun(r) { await monitorRuns.insertOne(toDoc(r)); },
+    async listMonitorRuns(wsId, limit = 200) { return (await monitorRuns.find({ wsId }).sort({ at: -1 }).limit(limit).toArray()).map(fromDoc); },
+    async pruneMonitorRuns(wsId, monitorId, keep) {
+      const old = await monitorRuns.find({ wsId, monitorId }, { projection: { at: 1 } }).sort({ at: -1 }).skip(keep).limit(1).toArray();
+      if (old.length) await monitorRuns.deleteMany({ wsId, monitorId, at: { $lte: old[0].at } });
+    },
+    async deleteMonitorRunsOfWorkspace(wsId) { await monitorRuns.deleteMany({ wsId }); },
   };
 }
 

@@ -28,11 +28,15 @@
   - [Variáveis e ambientes](#variáveis-e-ambientes)
   - [Workspaces](#workspaces)
   - [Trabalhar em equipe](#trabalhar-em-equipe)
+  - [Histórico, comentários e presença](#histórico-comentários-e-presença)
+  - [Monitores](#monitores)
   - [Scripts e testes (API pm.* do Postman)](#scripts-e-testes-api-pm-do-postman)
   - [Collection Runner com CSV](#collection-runner-com-csv)
   - [Comparar ambientes](#comparar-ambientes)
   - [Gerar tipos e gerar código](#gerar-tipos-e-gerar-código)
   - [Corpo da requisição](#corpo-da-requisição)
+  - [GraphQL, WebSocket e SSE](#graphql-websocket-e-sse)
+  - [Exemplos salvos e mock server](#exemplos-salvos-e-mock-server)
   - [SOAP, SEFAZ e certificado digital](#soap-sefaz-e-certificado-digital)
   - [Assinatura digital de XML](#assinatura-digital-de-xml)
   - [Trava de produção](#trava-de-produção)
@@ -153,7 +157,30 @@ Crie uma conta com um **@ único** e compartilhe um workspace. Para convidar, di
 - **O que não sai do seu computador:** valores marcados como segredo (cadeado), histórico, abas abertas e a árvore aberta ou fechada.
 - **Conflitos:** cada item é gravado separado, então duas pessoas editando requisições diferentes não se atrapalham. Na mesma requisição, vale a última gravação.
 - **Sem internet:** você continua trabalhando, e as mudanças vão quando a conexão volta.
-- **Permissões:** quem criou o workspace remove pessoas e pode excluí-lo para todos. Quem sai ou é removido fica com uma cópia local.
+- **Permissões:** ao convidar, escolha entre **pode editar** e **só leitura**. Quem tem só leitura vê tudo, envia as requisições e comenta, mas não altera o workspace. Quem criou o workspace muda o acesso das pessoas, remove pessoas e pode excluí-lo para todos. Quem sai ou é removido fica com uma cópia local.
+
+### Histórico, comentários e presença
+
+**Histórico com desfazer:** cada alteração fica registrada com quem fez e quando, como "@bia alterou Create Booking" ou "@ana excluiu Consulta". Clique numa alteração para ver o que mudou, com a URL antiga e a nova lado a lado. Use **Desfazer** para voltar ao valor anterior para todos, inclusive para recuperar algo excluído por engano. Abra pelo menu do workspace ou pelo menu de uma requisição, que mostra só o histórico dela.
+
+![Histórico de alterações](docs/screenshots/23-historico.png)
+
+**Comentários:** a aba **Comentários** da requisição guarda notas do time, como "esse endpoint muda em novembro". Dá para resolver, editar e apagar. A árvore mostra quantos comentários estão em aberto.
+
+![Comentários](docs/screenshots/24-comentarios.png)
+
+**Presença:** os avatares no topo mostram quem está no workspace agora. Na árvore e nas abas, aparece quem está com cada requisição aberta.
+
+### Monitores
+
+Um monitor roda uma coleção ou pasta de tempos em tempos (a cada 5 minutos, 15 minutos, 1 hora…) e avisa com uma notificação do Windows quando algo falha e quando volta. Um exemplo é o status da SEFAZ a cada 15 minutos.
+
+![Monitores](docs/screenshots/25-monitores.png)
+
+- **Onde roda:** no Mono aberto deste computador. Assim o monitor usa o seu certificado A1 e os seus segredos, que nunca vão para o servidor. Marque **Rodar aqui** no computador que deve executar.
+- **No time:** em workspace compartilhado, o resultado vai para todos, como "SEFAZ SP falhou (rodado por @luiz)", com o histórico das últimas execuções.
+- **O que conta como falha:** erro de rede, erro em script ou `pm.test` que não passou. Coloque testes na aba Scripts para checar o conteúdo da resposta.
+- **Onde criar:** pelo menu do workspace (**Monitores…**) ou pelo menu da coleção ou pasta (**Monitorar…**).
 
 ### Scripts e testes (API pm.* do Postman)
 
@@ -210,6 +237,34 @@ O Mono também guarda a estrutura da última resposta de cada endpoint e avisa e
 O seletor de tipo oferece JSON, XML / SOAP, texto, **form-data** (campos e arquivos), x-www-form-urlencoded e **binário** (um arquivo como corpo). O editor é o mesmo dos scripts, com linhas e cores.
 
 Arquivos são lidos na hora do envio, e só os que você escolheu na janela do Windows. Uma coleção importada não consegue fazer o app enviar outros arquivos do seu computador.
+
+### GraphQL, WebSocket e SSE
+
+**GraphQL:** no Body, escolha **GraphQL**. A tela fica dividida em query e variáveis (JSON). **Buscar schema** carrega o schema da API por introspecção, usando a mesma URL, headers e autenticação. Depois disso o editor sugere campos e argumentos no ponto certo da query, com o tipo de cada um. Com mais de uma operação, escolha qual executar.
+
+![GraphQL](docs/screenshots/26-graphql.png)
+
+**WebSocket e SSE:** no seletor de método, escolha **WS** (WebSocket) ou **SSE** (Server-Sent Events). O botão vira **Conectar**/**Desconectar**, e a resposta vira um registro das mensagens:
+- cada mensagem mostra direção, horário, tamanho e evento;
+- clique numa mensagem para ver o JSON formatado;
+- dá para filtrar as mensagens.
+
+No WebSocket, a aba **Mensagem** envia texto ou JSON com `{{variáveis}}` (Ctrl+Enter) e guarda mensagens prontas. Headers, auth, proxy e certificado A1 funcionam como nas requisições HTTP.
+
+![WebSocket](docs/screenshots/27-websocket.png)
+
+### Exemplos salvos e mock server
+
+Na resposta, **Salvar como exemplo** guarda o status, os headers e o corpo na requisição, na aba **Exemplos**. Os exemplos documentam a API, vão junto na exportação para o Postman e alimentam o **mock server**.
+
+No menu da coleção, **Mock server…** sobe uma API falsa em `http://127.0.0.1:4010`, montada com os exemplos, e o front pode trabalhar antes do back ficar pronto:
+- reconhece rotas com `{{id}}`, `:id` e `{id}`;
+- libera CORS;
+- dá para configurar um atraso nas respostas;
+- mostra as chamadas recebidas;
+- para escolher um exemplo específico, use o header `x-mono-example`.
+
+![Mock server](docs/screenshots/28-mock-server.png)
 
 ### SOAP, SEFAZ e certificado digital
 

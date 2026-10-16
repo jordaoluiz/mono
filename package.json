@@ -8,7 +8,7 @@
     "start": "electron .",
     "dev": "electron . --dev",
     "debug": "electron . --devtools --enable-logging",
-    "test": "node test/http.test.js && node test/shared.test.js && node test/docs.test.js && node test/scripts.test.js && node test/runner.test.js && node test/codegen.test.js && node test/certs.test.js && node test/soap.test.js && node test/sync.test.js && node test/cloud.test.js",
+    "test": "node test/http.test.js && node test/shared.test.js && node test/docs.test.js && node test/scripts.test.js && node test/runner.test.js && node test/codegen.test.js && node test/certs.test.js && node test/soap.test.js && node test/sync.test.js && node test/cloud.test.js && node test/collab.test.js && node test/mock.test.js && node test/realtime.test.js && node test/graphql.test.js",
     "dist": "electron-builder --win nsis",
     "release": "electron-builder --win nsis --publish always"
   },

@@ -5,6 +5,7 @@ const dup = () => Object.assign(new Error('duplicado'), { code: 'DUP' });
 
 function createMemoryDb() {
   const users = new Map(), sessions = new Map(), workspaces = new Map(), invites = new Map();
+  const changes = [], comments = new Map(), monitorRuns = [];
   return {
     kind: 'memória',
     async init() {},
@@ -56,6 +57,36 @@ function createMemoryDb() {
     async inviteById(id) { return clone(invites.get(id) || null); },
     async setInviteStatus(id, status) { const i = invites.get(id); if (i) Object.assign(i, { status, answeredAt: new Date().toISOString() }); },
     async deleteInvitesOfWorkspace(wsId) { for (const [k, i] of invites) if (i.wsId === wsId) invites.delete(k); },
+    async setMemberRole(id, userId, role) { const w = workspaces.get(id); const m = w && w.members.find((x) => x.userId === userId); if (m) m.role = role; },
+    // histórico de alterações
+    async addChange(c) { changes.push(clone(c)); },
+    async listChanges(wsId, { limit = 100, before = Infinity, itemId = null } = {}) {
+      return changes.filter((c) => c.wsId === wsId && c.version < before && (!itemId || c.items.some((i) => i.id === itemId)))
+        .sort((a, b) => b.version - a.version).slice(0, limit).map(clone);
+    },
+    async changeById(id) { return clone(changes.find((c) => c.id === id) || null); },
+    async changesAfter(wsId, version) { return changes.filter((c) => c.wsId === wsId && c.version > version).map(({ id, version: v, items, by }) => clone({ id, version: v, items, by })); },
+    async markUndone(id, undoneBy) { const c = changes.find((x) => x.id === id); if (c) c.undoneBy = undoneBy; },
+    async pruneChanges(wsId, keep) {
+      const mine = changes.filter((c) => c.wsId === wsId).sort((a, b) => b.version - a.version).slice(keep);
+      for (const c of mine) changes.splice(changes.indexOf(c), 1);
+    },
+    async deleteChangesOfWorkspace(wsId) { for (let i = changes.length - 1; i >= 0; i--) if (changes[i].wsId === wsId) changes.splice(i, 1); },
+    // comentários
+    async addComment(c) { comments.set(c.id, clone(c)); },
+    async listComments(wsId) { return [...comments.values()].filter((c) => c.wsId === wsId).sort((a, b) => a.at.localeCompare(b.at)).map(clone); },
+    async commentById(id) { return clone(comments.get(id) || null); },
+    async updateComment(id, fields) { const c = comments.get(id); if (c) Object.assign(c, clone(fields)); },
+    async deleteComment(id) { comments.delete(id); },
+    async deleteCommentsOfWorkspace(wsId) { for (const [k, c] of comments) if (c.wsId === wsId) comments.delete(k); },
+    // resultados de monitores
+    async addMonitorRun(r) { monitorRuns.push(clone(r)); },
+    async listMonitorRuns(wsId, limit = 200) { return monitorRuns.filter((r) => r.wsId === wsId).sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit).map(clone); },
+    async pruneMonitorRuns(wsId, monitorId, keep) {
+      const mine = monitorRuns.filter((r) => r.wsId === wsId && r.monitorId === monitorId).sort((a, b) => b.at.localeCompare(a.at)).slice(keep);
+      for (const r of mine) monitorRuns.splice(monitorRuns.indexOf(r), 1);
+    },
+    async deleteMonitorRunsOfWorkspace(wsId) { for (let i = monitorRuns.length - 1; i >= 0; i--) if (monitorRuns[i].wsId === wsId) monitorRuns.splice(i, 1); },
   };
 }
 

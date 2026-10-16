@@ -171,7 +171,7 @@ function codeEditor({ value = '', placeholder = '', onChange, label = 'Código',
     if (ta.selectionStart !== ta.selectionEnd) return closeSuggest();
     const lineText = before.slice(before.lastIndexOf('\n') + 1);
     if (/\/\//.test(lineText) && !force) return closeSuggest();
-    const s = suggestions(before);
+    const s = typeof complete === 'function' ? complete(before, force) : suggestions(before);
     if (!s) return closeSuggest();
     sug = s; sel = 0;
     menu.innerHTML = '';
@@ -204,7 +204,7 @@ function codeEditor({ value = '', placeholder = '', onChange, label = 'Código',
     if (!sug) return;
     const it = sug.items[sel];
     const start = ta.selectionStart - sug.prefix.length;
-    const text = it.call ? it.label + '()' : it.label;
+    const text = it.insert != null ? it.insert : it.call ? it.label + '()' : it.label;
     insertText(ta, text, start, ta.selectionStart);
     if (it.call) ta.setSelectionRange(ta.selectionStart - 1, ta.selectionStart - 1);
     closeSuggest();
@@ -278,6 +278,7 @@ function codeEditor({ value = '', placeholder = '', onChange, label = 'Código',
     onChange && onChange(ta.value);
     const ch = ta.value[ta.selectionStart - 1];
     if (!complete) closeSuggest();
+    else if (typeof complete === 'function') { if (e.inputType === 'insertText' && /[\w$@]/.test(ch || '')) openSuggest(); else closeSuggest(); }
     else if (e.inputType === 'insertText' && (ch === '.' || (sug && /[\w$]/.test(ch)))) openSuggest();
     else if (e.inputType === 'insertText' && /[\w$]/.test(ch || '')) { const before = ta.value.slice(0, ta.selectionStart); if (/(^|[^\w$.])[\w$]{2,}$/.test(before) && /^(pm|co|JS)/i.test(before.match(/[\w$]+$/)[0])) openSuggest(); else closeSuggest(); }
     else closeSuggest();

@@ -26,9 +26,11 @@ function newRequest(over = {}) {
 const session = () => (data.session ||= { tabs: [], active: null });
 const activeTab = () => session().tabs.find((t) => t.id === session().active);
 const rt = (tab) => (runtime[tab.id] ||= {});
+const extraCols = new Set(); // coleções de outro workspace em uso por um monitor
 function findRef(ref) {
   if (!ref) return null;
-  const col = data.collections.find((c) => c.id === ref.colId);
+  let col = data.collections.find((c) => c.id === ref.colId);
+  if (!col) for (const list of extraCols) { col = list.find((c) => c.id === ref.colId); if (col) break; }
   const req = col?.requests.find((r) => r.id === ref.reqId);
   return req ? { col, req } : null;
 }
@@ -100,7 +102,7 @@ const fill = (s, vars) => String(s || '').replace(/\{\{\s*(\$?[\w.-]+)\s*\}\}/g,
 // Cada workspace tem suas coleções, ambientes, globais, histórico e abas. O ativo fica no topo de `data`
 // (o resto do app não precisa saber que workspaces existem); os outros ficam guardados em workspaces[].data.
 // Configurações (proxy, certificados, IA) e o tema valem para todos.
-const WS_KEYS = ['collections', 'history', 'environments', 'activeEnvId', 'globals', 'session', 'snapshots', 'lastRun'];
+const WS_KEYS = ['collections', 'history', 'environments', 'activeEnvId', 'globals', 'session', 'snapshots', 'lastRun', 'monitors'];
 const activeWorkspace = () => data.workspaces.find((w) => w.id === data.activeWorkspaceId);
 function ensureWorkspaces() {
   data.workspaces ||= [];
@@ -109,7 +111,7 @@ function ensureWorkspaces() {
   activeWorkspace().data = null;
 }
 function normalizeWorkspace() {
-  data.collections ||= []; data.history ||= []; data.environments ||= []; data.globals ||= { vars: [] };
+  data.collections ||= []; data.history ||= []; data.environments ||= []; data.globals ||= { vars: [] }; data.monitors ||= [];
   if (data.activeEnvId && !envById(data.activeEnvId)) data.activeEnvId = data.environments[0]?.id || '';
   const s = session();
   s.tabs = s.tabs.filter((t) => t && t.draft);
@@ -139,12 +141,15 @@ function switchWorkspace(id, { quiet = false } = {}) {
   for (const k of WS_KEYS) if (next[k] !== undefined) data[k] = next[k];
   target.data = null;
   data.activeWorkspaceId = id;
+  for (const t of session().tabs) liveCloseTab(t);
   for (const k of Object.keys(runtime)) delete runtime[k];
   $('#modal').classList.add('hidden');
   $('#sideSearch').value = '';
   normalizeWorkspace();
   persist();
   renderWorkspaceBtn(); renderEnvSelect(); renderTabs(); renderRequest(); renderResponse(); renderSidebar();
+  if (target.shared && loggedIn()) { loadComments(target); loadMonitorRuns(target); }
+  renderMonAlert();
   if (!quiet) toast(`Workspace: ${target.name}`);
 }
 function renderWorkspaceBtn() {
@@ -155,6 +160,7 @@ function renderWorkspaceBtn() {
   const n = w.shared ? (w.shared.members || []).length : 0;
   people.className = 'ws-people' + (w.shared ? '' : ' hidden') + ' ' + (w.shared && loggedIn() ? cloud.state : 'off');
   $('.n', people).textContent = n;
+  $('#wsReadonly').classList.toggle('hidden', !(w.shared && myRole(w) === 'viewer'));
   $('#wsInvites').classList.toggle('hidden', !cloud.invites.length);
   $('#wsInvites').textContent = cloud.invites.length;
   const sync = w.shared ? (loggedIn() ? { online: 'sincronizando em tempo real', connecting: 'conectando…', offline: 'sem conexão — as mudanças vão quando voltar' }[cloud.state] || 'desconectado' : 'entre na conta para sincronizar') : '';
@@ -181,6 +187,8 @@ function openWorkspaceMenu(anchor) {
   });
   items.push('-');
   items.push({ label: cur.shared ? 'Pessoas e convites…' : 'Compartilhar este workspace…', run: () => openShare(cur) });
+  if (cur.shared) items.push({ label: 'Histórico de alterações…', run: () => openHistory(cur) });
+  items.push({ label: 'Monitores…', run: () => openMonitors(cur) });
   items.push({ label: '+ Novo workspace', run: () => openWorkspaceForm() }, { label: 'Gerenciar workspaces…', run: openWorkspaces });
   showMenu(anchor, items);
 }
@@ -271,6 +279,7 @@ function openWorkspaces() {
           e.stopPropagation();
           showMenu(more, [
             { label: w.shared ? 'Pessoas e convites…' : 'Compartilhar…', run: () => openShare(w) },
+            ...(w.shared ? [{ label: 'Histórico de alterações…', run: () => openHistory(w) }] : []),
             ...(w.shared && !isOwner(w) && loggedIn() ? [{ label: 'Sair (manter cópia local)', run: () => leaveShared(w, () => openWorkspaces()) }] : []),
             { label: 'Editar nome e descrição', run: () => openWorkspaceForm(w, { back: openWorkspaces }) },
             { label: 'Duplicar', run: () => { duplicateWorkspace(w); draw(); } },
@@ -308,7 +317,8 @@ const Sync = window.MonoSync;
 const MONO_CLOUD_URL = 'https://mono-server-production.up.railway.app'; // servidor oficial do Mono (Railway)
 const cloud = { state: 'off', invites: [], clientId: uid('cli'), timer: null, busy: new Set(), again: new Set(), buffer: new Map(), own: new Map(), gapTimer: new Map() };
 const cloudCfg = () => { const s = (data.settings ||= {}); return (s.cloud ||= { url: MONO_CLOUD_URL, token: '', user: null }); };
-const cloudUrl = () => MONO_CLOUD_URL || cloudCfg().url;
+let cloudOverride = ''; // MONO_SERVER=http://localhost:8787 npm run dev → testa com o servidor local
+const cloudUrl = () => cloudOverride || MONO_CLOUD_URL || cloudCfg().url;
 const loggedIn = () => !!(cloudCfg().token && cloudCfg().user && cloudUrl());
 const me = () => cloudCfg().user;
 const sharedWs = () => data.workspaces.filter((w) => w.shared);
@@ -366,6 +376,7 @@ function drain(w) {
 // Envia o que mudou desde a última versão confirmada.
 async function pushOps(w) {
   if (!w.shared || !loggedIn()) return;
+  if (!canEditWs(w)) { revertViewerChanges(w); return; }
   const id = w.shared.id;
   if (cloud.busy.has(id)) { cloud.again.add(id); return; }
   const ops = Sync.diff(w.shared.base || Sync.shareable({}), Sync.shareable(wsData(w)));
@@ -376,12 +387,14 @@ async function pushOps(w) {
     if (!w.shared) return;
     if (r.ok) {
       w.shared.base = Sync.applyOps(w.shared.base || Sync.shareable({}), ops);
+      if (r.data.change && historyModal && historyModal.w === w) historyModal.prepend(r.data.change);
       const crossed = r.data.version !== w.shared.version + 1;
       if (!cloud.own.has(id)) cloud.own.set(id, new Set());
       cloud.own.get(id).add(r.data.version);
       drain(w);
       if (crossed) setTimeout(() => resync(w), 300); // um colega gravou junto: confere com o servidor
     } else if (r.status === 404) detachShared(w, 'Este workspace não está mais compartilhado com você.');
+    else if (r.status === 403) { const g = await cloudCall('GET', `/v1/workspaces/${id}`); if (g.ok && w.shared) w.shared.members = g.data.workspace.members; revertViewerChanges(w); }
     else if (r.status && r.status !== 401) toast(r.error, 4000);
   } finally {
     cloud.busy.delete(id);
@@ -421,7 +434,7 @@ function detachShared(w, msg) {
 }
 function onCloudEvent({ event, data: p }) {
   if (!data) return;
-  if (event === 'hello') { refreshInvites(); for (const w of sharedWs()) resync(w); return; }
+  if (event === 'hello') { refreshInvites(); for (const w of sharedWs()) resync(w); presenceSent = ''; presenceTick(true); const aw = activeWorkspace(); if (aw.shared) { loadComments(aw); loadMonitorRuns(aw); } return; }
   if (event === 'invite') {
     cloud.invites = [p, ...cloud.invites.filter((i) => i.id !== p.id)];
     renderWorkspaceBtn();
@@ -429,17 +442,21 @@ function onCloudEvent({ event, data: p }) {
     return;
   }
   const w = p && p.ws ? wsByShared(p.ws) : null;
+  if (onCollabEvent(event, p, w)) return;
+  if (event === 'monitor') { if (w) onMonitorRun(w, p.run); return; }
   if (!w) return;
   if (event === 'ops') {
+    if (p.change && historyModal && historyModal.w === w) historyModal.prepend(p.change);
     if (p.version <= w.shared.version) return;
     if (!cloud.buffer.has(w.shared.id)) cloud.buffer.set(w.shared.id, new Map());
     cloud.buffer.get(w.shared.id).set(p.version, p.ops);
     drain(w);
-    if (w.id === data.activeWorkspaceId) toast(`@${p.by} alterou ${Sync.describe(p.ops, data)}`, 2600);
+    if (w.id === data.activeWorkspaceId) toast(`@${p.by} ${p.change ? p.change.summary : 'alterou ' + Sync.describe(p.ops)}`, 2600);
   } else if (event === 'members') {
     w.shared.members = p.members;
     if (p.joined && p.joined !== me()?.username) toast(`@${p.joined} entrou em “${w.name}”`, 3500);
     if (p.left && p.left !== me()?.username) toast(`@${p.left} saiu de “${w.name}”`, 3500);
+    if (p.roleChanged === me()?.username) toast(`@${p.by} mudou seu acesso em “${w.name}” para ${p.role === 'viewer' ? 'só leitura' : 'edição'}.`, 5000);
     w.shared.invites = (w.shared.invites || []).filter((i) => i.username !== p.joined);
     persist(); renderWorkspaceBtn(); refreshShareModal(w);
   } else if (event === 'workspace') {
@@ -447,7 +464,7 @@ function onCloudEvent({ event, data: p }) {
     if (p.description !== undefined) w.description = p.description;
     persist(); renderWorkspaceBtn();
   } else if (event === 'invited') {
-    w.shared.invites = [...(w.shared.invites || []).filter((i) => i.username !== p.username), { username: p.username }];
+    w.shared.invites = [...(w.shared.invites || []).filter((i) => i.username !== p.username), { username: p.username, role: p.role }];
     refreshShareModal(w);
   } else if (event === 'declined') {
     w.shared.invites = (w.shared.invites || []).filter((i) => i.username !== p.username);
@@ -458,8 +475,9 @@ function onCloudEvent({ event, data: p }) {
     detachShared(w, `${why} Ficou uma cópia só neste computador.`);
   }
 }
-function cloudInit() {
+async function cloudInit() {
   if (!api.cloud) return;
+  try { cloudOverride = (await api.cloud.defaultUrl?.()) || ''; } catch { /* sem override */ }
   api.cloud.onState((s) => { cloud.state = s.state; if (s.state === 'unauthorized') cloudLoggedOut('Sua sessão expirou. Entre de novo para continuar sincronizando.'); else renderWorkspaceBtn(); });
   api.cloud.onEvent(onCloudEvent);
   cloudStart();
@@ -514,7 +532,7 @@ function openAccount({ then = null } = {}) {
     swap.onclick = () => { mode = mode === 'login' ? 'register' : 'login'; draw(); user.focus(); };
     const submit = async () => {
       const show = (m) => { err.textContent = m; err.classList.remove('hidden'); };
-      const url = MONO_CLOUD_URL || server.value.trim();
+      const url = cloudOverride || MONO_CLOUD_URL || server.value.trim();
       if (!url) return show('Informe o endereço do servidor do Mono.');
       const u = Sync.normUser(user.value);
       if (!u) return show('Informe o seu @.');
@@ -567,6 +585,8 @@ function openShare(w) {
     const sugg = h('div', { class: 'at-sugg hidden' });
     const err = h('p', { class: 'ws-err hidden' });
     const inviteBtn = h('button', { class: 'btn-primary' }, 'Convidar');
+    const roleSel = h('select', { title: 'O que a pessoa pode fazer' }, h('option', { value: 'editor' }, 'Pode editar'), h('option', { value: 'viewer' }, 'Só leitura'));
+    queueMicrotask(() => customSelect(roleSel, { variant: 'compact' }));
     const draw = () => {
       list.innerHTML = '';
       for (const m of w.shared.members || []) {
@@ -583,13 +603,24 @@ function openShare(w) {
           h('div', { class: 'ws-avatar' }, (m.name || m.username)[0].toUpperCase()),
           h('div', { class: 'ws-info' },
             h('div', { class: 'ws-title' }, m.name || '@' + m.username, self ? h('span', { class: 'ws-badge' }, 'você') : null),
-            h('div', { class: 'ws-stats' }, '@' + m.username + ' · ' + (m.role === 'owner' ? 'criou o workspace' : 'pode editar'))),
+            h('div', { class: 'ws-stats' }, '@' + m.username + ' · ' + (ROLE_LABEL[m.role] || 'pode editar'))),
+          isOwner(w) && !self && m.role !== 'owner' ? (() => {
+            const sel = h('select', { title: 'Acesso' }, h('option', { value: 'editor' }, 'Pode editar'), h('option', { value: 'viewer' }, 'Só leitura'));
+            sel.value = m.role === 'viewer' ? 'viewer' : 'editor';
+            sel.addEventListener('change', async () => {
+              const r = await cloudCall('PATCH', `/v1/workspaces/${w.shared.id}/members/${m.userId}`, { role: sel.value });
+              if (!r.ok) { toast(r.error, 3000); sel.value = m.role; return; }
+              m.role = sel.value; persist(); toast(`@${m.username}: ${ROLE_LABEL[m.role]}`, 2200);
+            });
+            queueMicrotask(() => customSelect(sel, { variant: 'compact' }));
+            return sel;
+          })() : null,
           ...actions));
       }
       for (const i of w.shared.invites || []) {
         list.append(h('div', { class: 'ws-row compact pending' },
           h('div', { class: 'ws-avatar' }, i.username[0].toUpperCase()),
-          h('div', { class: 'ws-info' }, h('div', { class: 'ws-title' }, '@' + i.username), h('div', { class: 'ws-stats' }, 'Convite enviado — aguardando aceitar'))));
+          h('div', { class: 'ws-info' }, h('div', { class: 'ws-title' }, '@' + i.username), h('div', { class: 'ws-stats' }, `Convite enviado (${i.role === 'viewer' ? 'só leitura' : 'pode editar'}) — aguardando aceitar`))));
       }
     };
     shareModal = { w, draw };
@@ -611,10 +642,10 @@ function openShare(w) {
       const u = Sync.normUser(input.value);
       if (!u) return;
       inviteBtn.disabled = true;
-      const r = await cloudCall('POST', `/v1/workspaces/${w.shared.id}/invites`, { username: u });
+      const r = await cloudCall('POST', `/v1/workspaces/${w.shared.id}/invites`, { username: u, role: roleSel.value });
       inviteBtn.disabled = false;
       if (!r.ok) { err.textContent = r.error; err.classList.remove('hidden'); return; }
-      w.shared.invites = [...(w.shared.invites || []).filter((i) => i.username !== u), { username: r.data.invite.username }];
+      w.shared.invites = [...(w.shared.invites || []).filter((i) => i.username !== u), { username: r.data.invite.username, role: r.data.invite.role }];
       input.value = ''; sugg.classList.add('hidden'); persist(); draw();
       toast(`Convite enviado para @${r.data.invite.username}`, 3000);
     };
@@ -624,7 +655,8 @@ function openShare(w) {
     body.append(
       h('h2', {}, `Pessoas em “${w.name}”`),
       h('p', { class: 'sub' }, 'Quem estiver aqui vê e edita coleções, pastas, requisições, ambientes e variáveis globais em tempo real. Valores marcados como segredo (cadeado) não são compartilhados — cada pessoa preenche os seus.'),
-      h('div', { class: 'invite-row' }, h('div', { class: 'at-input grow' }, h('span', {}, '@'), input, sugg), inviteBtn),
+      canEditWs(w) ? h('div', { class: 'invite-row' }, h('div', { class: 'at-input grow' }, h('span', {}, '@'), input, sugg), roleSel, inviteBtn)
+        : h('p', { class: 'hint' }, 'Você tem acesso só de leitura: não pode convidar pessoas.'),
       err,
       list,
       h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: close }, 'Fechar')));
@@ -667,7 +699,7 @@ function openInvite(inv) {
     body.append(
       h('h2', {}, `Convite para “${inv.wsName}”`),
       h('p', { class: 'sub' }, `${inv.from.name || '@' + inv.from.username} (@${inv.from.username}) convidou você para editar junto.${inv.wsDescription ? ' — ' + inv.wsDescription : ''}`),
-      h('p', { class: 'acct-hint' }, 'Ao aceitar, as coleções e os ambientes do workspace aparecem aqui, e as mudanças de todos chegam em tempo real.'),
+      h('p', { class: 'acct-hint' }, inv.role === 'viewer' ? 'Acesso só de leitura: você vê tudo, envia as requisições e comenta, mas não altera o workspace.' : 'Ao aceitar, as coleções e os ambientes do workspace aparecem aqui, e as mudanças de todos chegam em tempo real.'),
       h('div', { class: 'modal-actions' },
         h('button', { class: 'btn-ghost', onclick: async () => {
           const r = await cloudCall('POST', `/v1/invites/${inv.id}/decline`);
@@ -678,12 +710,257 @@ function openInvite(inv) {
   });
 }
 
+// ---------- Colaboração: papel, presença, histórico e comentários ----------
+const myRole = (w) => (w && w.shared && me() ? ((w.shared.members || []).find((m) => m.userId === me().id) || {}).role : null);
+const canEditWs = (w) => !w || !w.shared || myRole(w) !== 'viewer';
+const ROLE_LABEL = { owner: 'criou o workspace', editor: 'pode editar', viewer: 'só leitura' };
+const initialOf = (u) => String((u && (u.name || u.username)) || '?').trim()[0].toUpperCase();
+const avatar = (u, cls = '') => h('span', { class: 'av ' + cls, title: `${u.name ? u.name + ' · ' : ''}@${u.username}` }, initialOf(u));
+const ago = (t) => {
+  const s = Math.round((Date.now() - new Date(t).getTime()) / 1000);
+  if (s < 45) return 'agora';
+  if (s < 3600) return `há ${Math.round(s / 60)} min`;
+  if (s < 86400) return `há ${Math.round(s / 3600)} h`;
+  return new Date(t).toLocaleString('pt-BR', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+};
+
+// Só leitura: o que foi mudado aqui volta ao que está no servidor.
+let viewerWarned = 0;
+function revertViewerChanges(w) {
+  const local = wsData(w);
+  const back = Sync.diff(Sync.shareable(local), w.shared.base || Sync.shareable({}));
+  if (!back.length) return;
+  Sync.applyOps(local, back);
+  if (w.id === data.activeWorkspaceId) {
+    for (const t of session().tabs) { const f = findRef(t.ref); if (f && !t.dirty) t.draft = clone(f.req); }
+    renderSidebar(); renderTabs(); renderEnvSelect(); renderRequest();
+  }
+  if (Date.now() - viewerWarned > 4000) { viewerWarned = Date.now(); toast('Você tem acesso só de leitura neste workspace: dá para enviar requisições, mas não salvar alterações.', 4500); }
+}
+
+// Presença: avisa o servidor qual workspace/requisição está aberta (só quando muda).
+cloud.presence = new Map(); // sharedId → [{ userId, username, name, reqIds }]
+let presenceSent = '';
+function presenceTick(force = false) {
+  if (!loggedIn() || cloud.state !== 'online' || !data) return;
+  const w = activeWorkspace();
+  const ws = w && w.shared ? w.shared.id : null;
+  const reqId = ws ? activeTab()?.ref?.reqId || null : null;
+  const key = `${ws}|${reqId}`;
+  if (!force && key === presenceSent) return;
+  presenceSent = key;
+  cloudCall('POST', '/v1/presence', { ws, reqId, clientId: cloud.clientId }).then((r) => {
+    if (r.ok && ws) { cloud.presence.set(ws, r.data.users); decorateCollab(); }
+  });
+}
+setInterval(() => { if (data) presenceTick(); }, 1200);
+const othersHere = () => {
+  const w = activeWorkspace();
+  if (!w || !w.shared) return [];
+  return (cloud.presence.get(w.shared.id) || []).filter((u) => u.userId !== me()?.id);
+};
+
+// Comentários por workspace compartilhado.
+cloud.comments = new Map(); // sharedId → [comment]
+async function loadComments(w) {
+  if (!w.shared) return;
+  const r = await cloudCall('GET', `/v1/workspaces/${w.shared.id}/comments`);
+  if (r.ok) { cloud.comments.set(w.shared.id, r.data.comments); if (w.id === data.activeWorkspaceId) { decorateCollab(); updateCounts(); if (reqTab === 'comments') renderReqEditor(); } }
+}
+const commentsFor = (reqId) => {
+  const w = activeWorkspace();
+  return w && w.shared ? (cloud.comments.get(w.shared.id) || []).filter((c) => c.reqId === reqId) : [];
+};
+
+// Avatares de quem está online (topo), de quem está em cada requisição e contagem de comentários na árvore.
+function decorateCollab() {
+  if (!data) return;
+  const box = $('#wsPresence');
+  if (box) {
+    box.innerHTML = '';
+    const others = othersHere();
+    for (const u of others.slice(0, 4)) box.append(avatar(u, 'on'));
+    if (others.length > 4) box.append(h('span', { class: 'av more' }, '+' + (others.length - 4)));
+    box.title = others.length ? `Online agora: ${others.map((u) => '@' + u.username).join(', ')}` : '';
+    box.classList.toggle('hidden', !others.length);
+  }
+  const byReq = new Map();
+  for (const u of othersHere()) for (const id of u.reqIds || []) byReq.set(id, [...(byReq.get(id) || []), u]);
+  const comments = new Map();
+  for (const c of (cloud.comments.get(activeWorkspace()?.shared?.id) || [])) if (!c.resolved) comments.set(c.reqId, (comments.get(c.reqId) || 0) + 1);
+  $$('.tree-row.request[data-req], .tab[data-req]').forEach((row) => {
+    row.querySelector('.row-collab')?.remove();
+    const id = row.dataset.req;
+    const users = byReq.get(id) || [], n = comments.get(id) || 0;
+    if (!users.length && !n) return;
+    const deco = h('span', { class: 'row-collab' },
+      n && row.classList.contains('tree-row') ? h('span', { class: 'cmt-count', title: `${n} comentário${n > 1 ? 's' : ''} em aberto` }, '💬 ' + n) : null,
+      ...users.slice(0, 3).map((u) => avatar(u, 'xs')));
+    const anchor = row.querySelector('.more, .x');
+    row.insertBefore(deco, anchor || null);
+  });
+}
+
+// Histórico de alterações (com desfazer).
+let historyModal = null; // { w, itemId, prepend }
+const FIELD_LABEL = { name: 'Nome', method: 'Método', url: 'URL', params: 'Params', headers: 'Headers', body: 'Body', auth: 'Auth', pre: 'Script antes', tests: 'Script depois', folderId: 'Pasta', examples: 'Exemplos', description: 'Descrição', vars: 'Variáveis', variables: 'Variáveis', message: 'Mensagem', messages: 'Mensagens salvas' };
+function changeLines(c) {
+  if (!c.ops) return [h('div', { class: 'muted small' }, 'Alteração grande demais para mostrar os detalhes.')];
+  const inv = c.inverse || [];
+  const prev = (op) => inv.find((x) => x.t === op.t && x.id === op.id && (x.col || null) === (op.col || null));
+  const kindName = { col: 'Coleção', fold: 'Pasta', req: 'Requisição', env: 'Ambiente', mon: 'Monitor' };
+  const out = [];
+  for (const op of c.ops) {
+    if (/Order$/.test(op.t)) { out.push(h('div', { class: 'chg-line' }, 'Reordenou itens')); continue; }
+    if (op.t === 'globals') { out.push(h('div', { class: 'chg-line' }, 'Alterou as variáveis globais')); continue; }
+    const kind = op.t.replace(/Del$/, '');
+    const item = (c.items || []).find((i) => i.id === op.id && i.t === kind);
+    const name = (op.v && op.v.name) || (item && item.name) || '';
+    if (/Del$/.test(op.t)) { out.push(h('div', { class: 'chg-line del' }, `${kindName[kind] || 'Item'} excluída: `, h('b', {}, name))); continue; }
+    const old = prev(op);
+    if (!old || !old.v) { out.push(h('div', { class: 'chg-line add' }, `${kindName[kind] || 'Item'} criada: `, h('b', {}, name))); continue; }
+    const fields = [...new Set([...Object.keys(old.v), ...Object.keys(op.v)])].filter((k) => k !== 'id' && JSON.stringify(old.v[k]) !== JSON.stringify(op.v[k]));
+    const detail = fields.map((k) => {
+      const a = old.v[k], b = op.v[k];
+      if ((typeof a === 'string' || a == null) && (typeof b === 'string' || b == null) && String(a ?? '').length < 160 && String(b ?? '').length < 160 && k !== 'pre' && k !== 'tests')
+        return h('div', { class: 'chg-field' }, h('span', { class: 'chg-k' }, FIELD_LABEL[k] || k), h('span', { class: 'chg-old' }, String(a ?? '—') || '—'), ' → ', h('span', { class: 'chg-new' }, String(b ?? '—') || '—'));
+      return h('div', { class: 'chg-field' }, h('span', { class: 'chg-k' }, FIELD_LABEL[k] || k), h('span', { class: 'muted' }, 'alterado'));
+    });
+    out.push(h('div', { class: 'chg-line' }, `${kindName[kind] || 'Item'} `, h('b', {}, name), detail.length ? h('div', { class: 'chg-fields' }, ...detail) : null));
+  }
+  return out;
+}
+async function undoChange(w, c, force = false) {
+  const r = await cloudCall('POST', `/v1/workspaces/${w.shared.id}/changes/${c.id}/undo`, force ? { force: true } : {});
+  if (r.ok) { toast('Alteração desfeita para todos', 2600); return true; }
+  if (r.status === 409 && /alterados depois/.test(r.error)) {
+    const who = [...new Set(((r.data && r.data.conflicts) || []).map((x) => '@' + x.by))].join(', ');
+    if (await confirmModal({ title: 'Desfazer mesmo assim?', sub: `Esses itens foram alterados depois${who ? ' por ' + who : ''}. Desfazer volta ao valor anterior a esta alteração e descarta as mudanças posteriores neles.`, ok: 'Desfazer mesmo assim' })) return undoChange(w, c, true);
+    return false;
+  }
+  toast(r.error, 4000);
+  return false;
+}
+function openHistory(w = activeWorkspace(), { itemId = null, title = null } = {}) {
+  if (!w.shared) {
+    return openModal((body, close) => body.append(h('h2', {}, 'Histórico de alterações'),
+      h('p', { class: 'sub' }, 'O histórico (com desfazer) fica guardado no servidor do Mono, então funciona em workspaces compartilhados. Compartilhe este workspace — mesmo sem convidar ninguém — para ter o histórico.'),
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: close }, 'Fechar'), h('button', { class: 'btn-primary', onclick: () => { close(); shareWorkspace(w); } }, 'Compartilhar'))));
+  }
+  openModal((body, close) => {
+    body.classList.add('wide');
+    const list = h('div', { class: 'chg-list' });
+    const more = h('button', { class: 'btn-ghost sm hidden' }, 'Carregar mais');
+    let oldest = Infinity;
+    const editable = canEditWs(w);
+    const row = (c) => {
+      const det = h('div', { class: 'chg-detail hidden' }, ...changeLines(c));
+      const undoBtn = editable && !c.undoneBy && c.ops !== null ? h('button', { class: 'btn-ghost sm', onclick: async (e) => { e.stopPropagation(); if (await undoChange(w, c)) { c.undoneBy = { username: me().username }; el.replaceWith(row(c)); } } }, 'Desfazer') : null;
+      const el = h('div', { class: 'chg-row' + (c.undoOf ? ' undo' : '') },
+        h('div', { class: 'chg-main', onclick: () => det.classList.toggle('hidden') },
+          avatar(c.by),
+          h('div', { class: 'chg-text' },
+            h('div', {}, h('b', {}, '@' + c.by.username), c.undoOf ? ' desfez uma alteração — ' : ' ', c.summary),
+            h('div', { class: 'muted small' }, ago(c.at), ` · versão ${c.version}`, c.undoneBy ? h('span', { class: 'tag' }, `desfeita por @${c.undoneBy.username}`) : null)),
+          undoBtn),
+        det);
+      return el;
+    };
+    const load = async () => {
+      more.disabled = true;
+      const q = new URLSearchParams({ limit: '40' });
+      if (Number.isFinite(oldest)) q.set('before', String(oldest));
+      if (itemId) q.set('item', itemId);
+      const r = await cloudCall('GET', `/v1/workspaces/${w.shared.id}/changes?${q}`);
+      more.disabled = false;
+      if (!r.ok) { list.append(h('p', { class: 'ws-err' }, r.error)); return; }
+      const changes = r.data.changes;
+      if (!changes.length && !Number.isFinite(oldest)) list.append(h('div', { class: 'placeholder small-ph' }, 'Nenhuma alteração registrada ainda.'));
+      for (const c of changes) { list.append(row(c)); oldest = Math.min(oldest, c.version); }
+      more.classList.toggle('hidden', changes.length < 40);
+    };
+    more.onclick = load;
+    historyModal = { w, itemId, prepend: (c) => { if (!itemId || (c.items || []).some((i) => i.id === itemId)) { list.querySelector('.small-ph')?.remove(); list.prepend(row(c)); } } };
+    body.append(h('h2', {}, title || `Histórico de “${w.name}”`),
+      h('p', { class: 'sub' }, editable ? 'Clique numa alteração para ver o que mudou. Desfazer aplica o valor anterior para todos — e também fica no histórico.' : 'Você tem acesso só de leitura: dá para ver o histórico, mas não desfazer.'),
+      list, h('div', { class: 'chg-more' }, more),
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: () => { historyModal = null; close(); } }, 'Fechar')));
+    load();
+  });
+}
+
+// Aba Comentários da requisição.
+function renderCommentsTab(ed, tab) {
+  const w = activeWorkspace();
+  const reqId = tab.ref?.reqId;
+  if (!w.shared) {
+    ed.append(h('div', { class: 'ex-empty' }, h('b', {}, 'Comentários são do time'), 'Compartilhe este workspace para deixar notas nas requisições, como “esse endpoint muda em novembro”.',
+      h('div', {}, h('button', { class: 'btn-ghost sm', onclick: () => openShare(w) }, 'Compartilhar workspace'))));
+    return;
+  }
+  if (!reqId) { ed.append(h('div', { class: 'ex-empty' }, h('b', {}, 'Salve a requisição primeiro'), 'Comentários ficam presos a uma requisição salva na coleção (Ctrl + S).')); return; }
+  if (!loggedIn()) { ed.append(h('div', { class: 'ex-empty' }, h('b', {}, 'Entre na sua conta'), 'Para ver e escrever comentários.', h('div', {}, h('button', { class: 'btn-ghost sm', onclick: () => openAccount() }, 'Entrar')))); return; }
+  const list = commentsFor(reqId);
+  const box = h('div', { class: 'cmt-list' });
+  for (const c of list) {
+    const mine = c.by.userId === me().id;
+    const owner = isOwner(w);
+    const text = h('div', { class: 'cmt-text' }, c.text);
+    const actions = h('div', { class: 'cmt-actions' },
+      h('button', { class: 'btn-text sm', onclick: async () => { const r = await cloudCall('PATCH', `/v1/workspaces/${w.shared.id}/comments/${c.id}`, { resolved: !c.resolved }); if (!r.ok) toast(r.error, 3000); } }, c.resolved ? 'Reabrir' : 'Resolver'),
+      mine ? h('button', { class: 'btn-text sm', onclick: async () => {
+        const o = await promptModal({ title: 'Editar comentário', label: 'Comentário', value: c.text, ok: 'Salvar' });
+        if (o) { const r = await cloudCall('PATCH', `/v1/workspaces/${w.shared.id}/comments/${c.id}`, { text: o.value }); if (!r.ok) toast(r.error, 3000); }
+      } }, 'Editar') : null,
+      mine || owner ? h('button', { class: 'btn-text sm', onclick: async () => {
+        if (!(await confirmModal({ title: 'Apagar comentário?', sub: 'Ele some para todo o time.', ok: 'Apagar' }))) return renderRequest();
+        const r = await cloudCall('DELETE', `/v1/workspaces/${w.shared.id}/comments/${c.id}`); if (!r.ok) toast(r.error, 3000);
+      } }, 'Apagar') : null);
+    box.append(h('div', { class: 'cmt' + (c.resolved ? ' resolved' : '') }, avatar(c.by),
+      h('div', { class: 'cmt-body' },
+        h('div', { class: 'cmt-meta' }, h('b', {}, c.by.name || '@' + c.by.username), h('span', { class: 'muted small' }, ` @${c.by.username} · ${ago(c.at)}${c.editedAt ? ' · editado' : ''}`),
+          c.resolved ? h('span', { class: 'tag' }, `resolvido${c.resolvedBy ? ' por @' + c.resolvedBy : ''}`) : null),
+        text, actions)));
+  }
+  if (!list.length) box.append(h('p', { class: 'hint' }, 'Nenhum comentário nesta requisição.'));
+  const input = h('textarea', { class: 'cmt-input', rows: 3, placeholder: 'Escreva um comentário para o time…  (Ctrl + Enter envia)' });
+  const post = async () => {
+    const text = input.value.trim();
+    if (!text) return;
+    input.disabled = true;
+    const r = await cloudCall('POST', `/v1/workspaces/${w.shared.id}/comments`, { reqId, colId: tab.ref.colId, text });
+    input.disabled = false;
+    if (!r.ok) return toast(r.error, 3000);
+    input.value = '';
+  };
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); e.stopPropagation(); post(); } });
+  ed.append(box, h('div', { class: 'cmt-compose' }, input, h('div', { class: 'row-actions' }, h('div', { class: 'grow' }), h('button', { class: 'btn-primary sm', onclick: post }, 'Comentar'))));
+}
+function onCollabEvent(event, p, w) {
+  if (event === 'presence') { cloud.presence.set(p.ws, p.users); decorateCollab(); return true; }
+  if (event === 'comment') {
+    const list = cloud.comments.get(p.ws) || [];
+    if (p.action === 'add') list.push(p.comment);
+    else if (p.action === 'update') { const i = list.findIndex((c) => c.id === p.comment.id); if (i >= 0) list[i] = p.comment; }
+    else if (p.action === 'delete') { const i = list.findIndex((c) => c.id === p.comment.id); if (i >= 0) list.splice(i, 1); }
+    cloud.comments.set(p.ws, list);
+    if (w && w.id === data.activeWorkspaceId) {
+      decorateCollab(); updateCounts();
+      if (reqTab === 'comments' && activeTab()?.ref?.reqId === p.comment.reqId) renderReqEditor();
+      else if (p.action === 'add' && p.comment.by.userId !== me()?.id) toast(`@${p.comment.by.username} comentou: “${p.comment.text.slice(0, 80)}”`, 4000);
+    }
+    return true;
+  }
+  return false;
+}
+
 // ---------- Persistência ----------
 let saveTimer;
 function persist() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => api.save(stripEmpty(data)), 250);
   scheduleSync();
+  mockRefresh();
 }
 function stripEmpty(d) {
   // Remove linhas vazias de tabelas antes de gravar.
@@ -740,6 +1017,7 @@ async function closeTab(id) {
   const s = session();
   const tab = s.tabs.find((t) => t.id === id);
   if (tab?.dirty && !(await confirmModal({ title: 'Descartar alterações?', sub: `"${tab.draft.name}" tem alterações não salvas.`, ok: 'Descartar' }))) return;
+  if (tab) liveCloseTab(tab);
   const idx = s.tabs.findIndex((t) => t.id === id);
   s.tabs.splice(idx, 1);
   delete runtime[id];
@@ -757,11 +1035,12 @@ function markDirty() {
   persist();
 }
 
-function renderTabs() {
+function renderTabs() { renderTabsCore(); decorateCollab(); }
+function renderTabsCore() {
   const wrap = $('#tabs');
   wrap.innerHTML = '';
   for (const t of session().tabs) {
-    const el = h('div', { class: `tab${t.id === session().active ? ' active' : ''}${t.dirty ? ' dirty' : ''}`, 'data-id': t.id, title: t.draft.url || t.draft.name },
+    const el = h('div', { class: `tab${t.id === session().active ? ' active' : ''}${t.dirty ? ' dirty' : ''}${rt(t).live?.state === 'open' ? ' live-on' : ''}`, 'data-id': t.id, 'data-req': t.ref?.reqId || null, title: t.draft.url || t.draft.name },
       h('span', { class: 'm ' + methodClass(t.draft.method) }, t.draft.method),
       h('span', { class: 'name' }, t.draft.name),
       h('button', { class: 'x', title: 'Fechar (Ctrl W)', html: icons.x, onclick: (e) => { e.stopPropagation(); closeTab(t.id); } }));
@@ -777,6 +1056,7 @@ function renderTabs() {
 const METHODS = [
   ['GET', 'Buscar dados'], ['POST', 'Criar recurso'], ['PUT', 'Substituir recurso'], ['PATCH', 'Atualizar em parte'],
   ['DELETE', 'Remover recurso'], ['HEAD', 'Só os headers'], ['OPTIONS', 'Métodos permitidos'],
+  ['WS', 'WebSocket (conexão contínua)'], ['SSE', 'Server-Sent Events (eventos do servidor)'],
 ];
 const methodClass = (m) => (METHODS.some(([k]) => k === m) ? m : 'CUSTOM');
 function setMethodButton(m) {
@@ -788,7 +1068,9 @@ function setMethod(m) {
   if (!m) return;
   const r = activeTab().draft;
   if (r.method === m) return;
+  const was = kindOf(r);
   r.method = m; setMethodButton(m); markDirty();
+  if (was !== kindOf(r)) { const tab = activeTab(); if (was !== 'http') liveCloseTab(tab); renderRequest(); renderResponse(); }
 }
 function initMethodMenu() {
   const btn = $('#method'), menu = $('#methodMenu');
@@ -863,7 +1145,11 @@ function renderRequest() {
   setMethodButton(r.method);
   $('#url').value = r.url;
   $('#dirtyDot').classList.toggle('on', tab.dirty);
-  $$('#reqTabs button').forEach((b) => b.classList.toggle('active', b.dataset.rt === reqTab));
+  const allowed = { http: ['params', 'headers', 'body', 'auth', 'scripts', 'examples', 'comments'], ws: ['message', 'params', 'headers', 'auth', 'comments'], sse: ['params', 'headers', 'auth', 'comments'] }[kindOf(r)];
+  if (!allowed.includes(reqTab)) reqTab = allowed[0];
+  $('#compareBtn')?.classList.toggle('hidden', kindOf(r) !== 'http');
+  $('#curlBtn')?.classList.toggle('hidden', kindOf(r) !== 'http');
+  $$('#reqTabs button').forEach((b) => { b.classList.toggle('active', b.dataset.rt === reqTab); b.hidden = !allowed.includes(b.dataset.rt); });
   updateCounts();
   renderReqEditor();
   window.MonoVars.refresh();
@@ -874,6 +1160,9 @@ function updateCounts() {
   $('#cParams').textContent = n(r.params);
   $('#cHeaders').textContent = n(r.headers);
   $('#cScripts').classList.toggle('on', !!(String(r.pre || '').trim() || String(r.tests || '').trim()));
+  $('#cExamples').textContent = (r.examples || []).length || '';
+  const tabRef = activeTab().ref;
+  $('#cComments').textContent = tabRef ? commentsFor(tabRef.reqId).filter((c) => !c.resolved).length || '' : '';
 }
 function chips(options, current, onPick) {
   return h('div', { class: 'radio-row' }, options.map(([val, label]) =>
@@ -902,6 +1191,12 @@ function renderReqEditor() {
       inherited: found ? inheritedAuth(found.col, found.req.folderId) : null,
       onEditParent: found ? () => { const inh = inheritedAuth(found.col, found.req.folderId); openContainerAuth(found.col, inh.holder === found.col ? null : inh.holder); } : null,
     }));
+  } else if (reqTab === 'comments') {
+    renderCommentsTab(ed, activeTab());
+  } else if (reqTab === 'message') {
+    renderMessageEditor(ed, activeTab());
+  } else if (reqTab === 'examples') {
+    renderExamplesTab(ed, activeTab());
   } else if (reqTab === 'scripts') {
     const which = scriptWhich || (String(r.pre || '').trim() && !String(r.tests || '').trim() ? 'pre' : 'post');
     ed.append(window.MonoScripts.scriptsPanel(r, { which, onWhich: (k) => { scriptWhich = k; }, onChange: changed }));
@@ -982,12 +1277,14 @@ function multipartTable(rows, onChange) {
 function renderBodyEditor(ed, b, changed) {
   b.form ||= []; b.multipart ||= [];
   // Tipo do corpo num select (como no Postman); as ações do tipo ficam na mesma linha.
-  const typeSel = h('select', {}, [['none', 'Nenhum'], ['json', 'JSON'], ['xml', 'XML / SOAP'], ['text', 'Texto'], ['multipart', 'Form-data'], ['form', 'x-www-form-urlencoded'], ['binary', 'Binário']]
+  const typeSel = h('select', {}, [['none', 'Nenhum'], ['json', 'JSON'], ['graphql', 'GraphQL'], ['xml', 'XML / SOAP'], ['text', 'Texto'], ['multipart', 'Form-data'], ['form', 'x-www-form-urlencoded'], ['binary', 'Binário']]
     .map(([v, l]) => h('option', { value: v }, l)));
   typeSel.value = b.type || 'none';
   typeSel.addEventListener('change', () => {
     if (typeSel.value === 'xml' && b.type === 'json') b.raw = '';
-    b.type = typeSel.value; changed(); renderReqEditor();
+    b.type = typeSel.value;
+    if (b.type === 'graphql') { const r = activeTab().draft; if (!isMutating(r.method) || kindOf(r) !== 'http') { r.method = 'POST'; setMethodButton('POST'); } }
+    changed(); renderReqEditor();
   });
   const bar = h('div', { class: 'body-bar' }, h('span', { class: 'body-bar-label' }, 'Tipo'), typeSel);
   ed.append(bar);
@@ -1026,6 +1323,8 @@ function renderBodyEditor(ed, b, changed) {
         } }, 'Verificar') : null);
     }
     ed.append(h('div', { class: 'body-code' }, editor));
+  } else if (b.type === 'graphql') {
+    renderGraphqlBody(ed, bar, b, changed);
   } else if (b.type === 'form') {
     ed.append(kvTable(b.form, changed, { keyPh: 'Campo' }));
   } else if (b.type === 'multipart') {
@@ -1542,6 +1841,7 @@ async function afterResponse(tab, req, res, env) {
 
 async function send() {
   const tab = activeTab();
+  if (kindOf(tab.draft) !== 'http') return liveToggle(tab);
   const state = rt(tab);
   if (state.loading) return;
   let req = clone(tab.draft);
@@ -1599,6 +1899,424 @@ async function send() {
   persist();
   if (side === 'history') renderSidebar();
   done(res);
+}
+
+// ---------- WebSocket e SSE ----------
+// O método "WS" ou "SSE" transforma a aba numa conexão contínua: Conectar/Desconectar e um registro de mensagens.
+const kindOf = (r) => (r && r.method === 'WS' ? 'ws' : r && r.method === 'SSE' ? 'sse' : 'http');
+const LIVE_MAX = 2000, LIVE_SHOW = 500;
+const liveOf = (tab) => (rt(tab).live ||= { state: 'off', log: [], since: null, filter: '', open: new Set() });
+let liveFrame = 0;
+function liveInit() {
+  if (!api.realtime) return;
+  api.realtime.onEvent((e) => {
+    const tab = session().tabs.find((t) => t.id === e.id);
+    if (!tab) return;
+    const L = liveOf(tab);
+    if (e.type === 'connecting') { L.state = 'connecting'; L.since = null; }
+    else if (e.type === 'open') { L.state = 'open'; L.since = e.at; }
+    else if (e.type === 'close') L.state = 'off';
+    L.log.push(e);
+    if (L.log.length > LIVE_MAX) L.log.splice(0, L.log.length - LIVE_MAX);
+    $(`.tab[data-id="${tab.id}"]`)?.classList.toggle('live-on', L.state === 'open');
+    if (activeTab() === tab && !liveFrame) liveFrame = requestAnimationFrame(() => { liveFrame = 0; if (kindOf(activeTab().draft) !== 'http') renderResponse(); });
+  });
+}
+function liveCloseTab(tab) {
+  const L = rt(tab).live;
+  if (L && L.state !== 'off' && api.realtime) api.realtime.close({ id: tab.id }).catch(() => {});
+}
+async function liveToggle(tab) {
+  if (!api.realtime) return toast('WebSocket e SSE só funcionam no app instalado.', 3000);
+  const L = liveOf(tab);
+  if (L.state !== 'off') { await api.realtime.close({ id: tab.id }).catch(() => {}); return; }
+  const req = clone(tab.draft);
+  const kind = kindOf(req);
+  const env = activeEnv(), col = tabCol(tab);
+  const vars = mergedVars(env, col);
+  await prepareAuth(tab, req, vars);
+  req.method = 'GET';
+  req.body = { type: 'none' };
+  L.log = []; L.open = new Set(); L.state = 'connecting';
+  renderResponse();
+  try { await api.realtime.connect({ id: tab.id, kind, req, vars }); }
+  catch (e) { L.state = 'off'; L.log.push({ id: tab.id, type: 'error', at: Date.now(), error: e.message }); renderResponse(); }
+}
+async function liveSend(tab) {
+  const L = liveOf(tab);
+  if (L.state !== 'open') return toast('Conecte antes de enviar.', 2000);
+  const m = tab.draft.message || {};
+  const text = fill(m.text || '', envVars());
+  if (!text) return toast('Escreva a mensagem.', 1800);
+  try { await api.realtime.send({ id: tab.id, data: text }); } catch (e) { toast(e.message, 3000); }
+}
+function renderMessageEditor(ed, tab) {
+  const r = tab.draft;
+  r.message ||= { text: '', format: 'json' };
+  const m = r.message;
+  const L = liveOf(tab);
+  const fmtSel = h('select', {}, h('option', { value: 'json' }, 'JSON'), h('option', { value: 'text' }, 'Texto'));
+  fmtSel.value = m.format || 'json';
+  fmtSel.addEventListener('change', () => { m.format = fmtSel.value; markDirty(); renderReqEditor(); });
+  const sendBtn = h('button', { class: 'btn-primary sm', disabled: L.state !== 'open', title: 'Ctrl + Enter', onclick: () => liveSend(tab) }, 'Enviar mensagem');
+  const bar = h('div', { class: 'body-bar' }, h('span', { class: 'body-bar-label' }, 'Mensagem'), fmtSel, h('div', { class: 'grow' }),
+    m.format === 'json' ? h('button', { class: 'btn-ghost sm', onclick: () => { try { m.text = JSON.stringify(JSON.parse(m.text), null, 2); markDirty(); renderReqEditor(); } catch (e) { toast('JSON inválido: ' + e.message, 2400); } } }, 'Formatar JSON') : null,
+    sendBtn);
+  queueMicrotask(() => customSelect(fmtSel, { variant: 'compact' }));
+  const editor = window.MonoScripts.codeEditor({ value: m.text || '', placeholder: m.format === 'json' ? '{\n  "tipo": "assinar",\n  "canal": "{{canal}}"\n}' : 'Mensagem', label: 'Mensagem', highlight: m.format === 'json' ? highlightJson : (v) => esc(v), complete: false, onChange: (v) => { m.text = v; markDirty(); } });
+  const box = h('div', { class: 'body-code' }, editor);
+  box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); e.stopPropagation(); liveSend(tab); } });
+  // mensagens salvas na requisição
+  r.messages ||= [];
+  const saved = h('div', { class: 'msg-saved' },
+    h('div', { class: 'msg-saved-head' }, h('span', { class: 'section-label' }, 'Mensagens salvas'),
+      h('button', { class: 'btn-text sm', onclick: async () => {
+        if (!m.text) return toast('Escreva a mensagem primeiro.', 1800);
+        const o = await promptModal({ title: 'Salvar mensagem', label: 'Nome', value: '', ok: 'Salvar' });
+        if (o) { r.messages.push({ id: uid('msg'), name: o.value, text: m.text, format: m.format }); markDirty(); renderReqEditor(); }
+      } }, '+ Salvar esta')),
+    r.messages.length ? r.messages.map((x) => h('div', { class: 'msg-saved-row' },
+      h('button', { class: 'linklike', title: 'Carregar no editor', onclick: () => { m.text = x.text; m.format = x.format || m.format; markDirty(); renderReqEditor(); } }, x.name),
+      h('div', { class: 'grow' }),
+      h('button', { class: 'btn-text sm', disabled: L.state !== 'open', onclick: async () => { try { await api.realtime.send({ id: tab.id, data: fill(x.text, envVars()) }); } catch (e) { toast(e.message, 3000); } } }, 'Enviar'),
+      h('button', { class: 'del', title: 'Remover', html: icons.x, onclick: () => { r.messages.splice(r.messages.indexOf(x), 1); markDirty(); renderReqEditor(); } })))
+      : h('p', { class: 'hint' }, 'Guarde mensagens que você manda sempre (assinar canal, ping, autenticar) para enviar com um clique.'));
+  ed.append(bar, box, saved);
+}
+const hhmmss = (t) => { const d = new Date(t); return d.toLocaleTimeString('pt-BR', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0'); };
+function renderLive(pane, tab) {
+  const L = liveOf(tab);
+  const kind = kindOf(tab.draft);
+  const sendBtn = $('#sendBtn');
+  sendBtn.disabled = false;
+  sendBtn.textContent = L.state === 'open' ? 'Desconectar' : L.state === 'connecting' ? 'Cancelar' : 'Conectar';
+  sendBtn.classList.toggle('danger', L.state !== 'off');
+  const msgs = L.log.filter((e) => e.type === 'message');
+  const out = msgs.filter((e) => e.dir === 'out').length, inn = msgs.length - out;
+  const elapsed = L.since ? Math.round((Date.now() - L.since) / 1000) : 0;
+  const stTxt = { open: `Conectado${elapsed ? ' · ' + (elapsed < 60 ? elapsed + ' s' : Math.floor(elapsed / 60) + ' min') : ''}`, connecting: 'Conectando…', off: L.log.length ? 'Desconectado' : 'Pronto para conectar' }[L.state];
+  const filter = h('input', { class: 'live-filter', placeholder: 'Filtrar mensagens', value: L.filter, spellcheck: 'false' });
+  filter.addEventListener('input', () => { L.filter = filter.value; drawList(); });
+  const list = h('div', { class: 'live-list' });
+  const atBottom = () => list.scrollHeight - list.scrollTop - list.clientHeight < 40;
+  function rowFor(e, i) {
+    if (e.type === 'message') {
+      const json = (() => { try { return e.binary ? null : JSON.parse(e.data); } catch { return null; } })();
+      const key = e.at + ':' + i;
+      const open = L.open.has(key);
+      const preview = e.binary ? `binário · ${fmtBytes(e.size)}` : String(e.data).replace(/\s+/g, ' ').slice(0, 300);
+      const row = h('div', { class: 'live-row msg ' + e.dir + (open ? ' open' : '') },
+        h('span', { class: 'live-dir', title: e.dir === 'out' ? 'Enviada' : 'Recebida' }, e.dir === 'out' ? '↑' : '↓'),
+        h('span', { class: 'live-time' }, hhmmss(e.at)),
+        kind === 'sse' && e.event ? h('span', { class: 'live-ev' }, e.event) : null,
+        h('span', { class: 'live-prev' + (json ? ' json' : '') }, preview),
+        h('span', { class: 'live-size' }, fmtBytes(e.size || 0)));
+      row.addEventListener('click', (ev) => { if (ev.target.closest('.live-detail')) return; if (open) L.open.delete(key); else L.open.add(key); drawList(true); });
+      if (open) {
+        const full = e.binary ? `(binário, ${fmtBytes(e.size)}) base64: ${e.data}` : json ? JSON.stringify(json, null, 2) : String(e.data);
+        row.append(h('div', { class: 'live-detail' },
+          h('div', { class: 'live-detail-tools' }, e.eventId ? h('span', { class: 'muted small' }, 'id: ' + e.eventId) : null, h('div', { class: 'grow' }), copyButton(full, 'Copiar')),
+          json ? h('pre', { class: 'code', html: highlightJson(full) }) : h('pre', { class: 'code' }, full)));
+      }
+      return row;
+    }
+    const sys = {
+      connecting: () => `Conectando em ${e.url}`,
+      open: () => kind === 'ws' ? `Conectado (${e.status} Switching Protocols${e.protocol ? ' · ' + e.protocol : ''})` : `Conectado (HTTP ${e.status})`,
+      close: () => `Desconectado${e.code && e.code !== 1000 && e.code !== 1005 ? ' · código ' + e.code : ''}${e.reason ? ' · ' + e.reason : ''}`,
+      error: () => e.error, note: () => e.text,
+    }[e.type];
+    return h('div', { class: 'live-row sys ' + e.type }, h('span', { class: 'live-dir' }, e.type === 'error' ? '!' : '•'), h('span', { class: 'live-time' }, hhmmss(e.at)), h('span', { class: 'live-prev' }, sys ? sys() : e.type));
+  }
+  function drawList(keepScroll) {
+    const stick = !keepScroll && (list.childElementCount === 0 || atBottom());
+    const q = L.filter.trim().toLowerCase();
+    const rows = L.log.map((e, i) => [e, i]).filter(([e]) => !q || (e.type === 'message' && (String(e.data).toLowerCase().includes(q) || String(e.event || '').toLowerCase().includes(q))));
+    const st = list.scrollTop;
+    list.innerHTML = '';
+    if (rows.length > LIVE_SHOW) list.append(h('div', { class: 'live-more muted small' }, `Mostrando as últimas ${LIVE_SHOW} de ${rows.length}`));
+    for (const [e, i] of rows.slice(-LIVE_SHOW)) list.append(rowFor(e, i));
+    if (!rows.length) list.append(h('div', { class: 'placeholder small-ph' }, L.log.length ? 'Nenhuma mensagem com esse filtro.' : kind === 'ws' ? 'Conecte para trocar mensagens. Escreva na aba Mensagem e envie com Ctrl + Enter.' : 'Conecte para receber os eventos do servidor.'));
+    if (stick) list.scrollTop = list.scrollHeight; else list.scrollTop = st;
+  }
+  pane.append(
+    h('div', { class: 'res-head live-head' },
+      h('div', { class: 'metrics' },
+        h('span', { class: 'live-state ' + L.state }, h('span', { class: 'dot' }), stTxt),
+        h('span', {}, kind === 'ws' ? 'WebSocket' : 'Server-Sent Events'),
+        msgs.length ? h('span', {}, kind === 'ws' ? `↑ ${out} · ↓ ${inn}` : `${inn} eventos`) : null),
+      h('div', { class: 'res-tools' }, filter, L.log.length ? h('button', { class: 'btn-ghost sm', onclick: () => { L.log = []; L.open = new Set(); renderResponse(); } }, 'Limpar') : null)),
+    list);
+  drawList();
+}
+
+// ---------- GraphQL ----------
+const gqlSchemas = new Map(); // URL resolvida → schema (só nesta sessão do app)
+const gqlKey = (tab) => fill(tab.draft.url || '', envVars()).split('?')[0];
+async function fetchGqlSchema(tab, onDone) {
+  const req = clone(tab.draft);
+  req.method = 'POST';
+  req.body = { type: 'graphql', graphql: { query: window.MonoGraphQL.INTROSPECTION, variables: '' } };
+  const env = activeEnv(), col = tabCol(tab);
+  const vars = mergedVars(env, col);
+  await prepareAuth(tab, req, vars);
+  const res = await api.send(req, vars);
+  if (!res.ok) return toast('Não consegui buscar o schema: ' + res.error, 4000);
+  let json;
+  try { json = JSON.parse(res.body); } catch { return toast(`A API respondeu ${res.status}, mas não em JSON.`, 3600); }
+  if (json.errors && !json.data) return toast('A API recusou a introspecção: ' + (json.errors[0]?.message || 'erro'), 4200);
+  try {
+    const schema = window.MonoGraphQL.fromIntrospection(json);
+    gqlSchemas.set(gqlKey(tab), schema);
+    toast(`Schema carregado: ${schema.count} tipos`, 2200);
+    onDone?.();
+  } catch (e) { toast(e.message, 4000); }
+}
+function renderGraphqlBody(ed, bar, b, changed) {
+  b.graphql ||= { query: '', variables: '' };
+  const g = b.graphql;
+  const tab = activeTab();
+  const G = window.MonoGraphQL;
+  const sch = gqlSchemas.get(gqlKey(tab));
+  const ops = G.operations(g.query || '');
+  let opSel = null;
+  if (ops.length > 1) {
+    opSel = h('select', { title: 'Operação a executar (operationName)' }, ops.map((o) => h('option', { value: o.name }, `${o.type} ${o.name}`)));
+    opSel.value = g.operationName && ops.some((o) => o.name === g.operationName) ? g.operationName : ops[0].name;
+    g.operationName = opSel.value;
+    opSel.addEventListener('change', () => { g.operationName = opSel.value; changed(); });
+    queueMicrotask(() => customSelect(opSel, { variant: 'compact' }));
+  } else if (g.operationName) { g.operationName = ''; }
+  bar.append(opSel, h('div', { class: 'grow' }),
+    h('span', { class: 'muted small', title: sch ? 'Autocompletar ativo (Ctrl + Espaço)' : '' }, sch ? `Schema · ${sch.count} tipos` : 'Sem schema'),
+    h('button', { class: 'btn-ghost sm', title: 'Busca o schema por introspecção, com a mesma URL, headers e autenticação', onclick: () => fetchGqlSchema(tab, () => renderReqEditor()) }, sch ? 'Atualizar schema' : 'Buscar schema'));
+  const qEd = window.MonoScripts.codeEditor({ value: g.query || '', placeholder: 'query {\n  campo {\n    subcampo\n  }\n}', label: 'Query GraphQL', highlight: G.highlight,
+    complete: (before, force) => G.completions(gqlSchemas.get(gqlKey(tab)), before, force),
+    onChange: (v) => { const had = G.operations(g.query || '').length > 1; g.query = v; changed(); if (had !== (G.operations(v).length > 1)) renderReqEditor(); } });
+  const vEd = window.MonoScripts.codeEditor({ value: g.variables || '', placeholder: '{\n  "id": "{{id}}"\n}', label: 'Variáveis', highlight: highlightJson, complete: false, onChange: (v) => { g.variables = v; changed(); } });
+  ed.append(h('div', { class: 'gql-split' },
+    h('div', { class: 'gql-pane' }, h('div', { class: 'gql-label' }, 'Query'), h('div', { class: 'body-code' }, qEd)),
+    h('div', { class: 'gql-pane vars' }, h('div', { class: 'gql-label' }, 'Variáveis (JSON)'), h('div', { class: 'body-code' }, vEd))));
+}
+
+// ---------- Monitores ----------
+// Um monitor roda uma coleção (ou pasta) de tempos em tempos, no Mono deste computador — assim usa o certificado A1
+// e os segredos locais, que nunca saem daqui. Em workspace compartilhado, o resultado vai para o servidor e o time vê.
+const MON_EVERY = [[5, 'A cada 5 minutos'], [15, 'A cada 15 minutos'], [30, 'A cada 30 minutos'], [60, 'A cada hora'], [360, 'A cada 6 horas'], [1440, 'Uma vez por dia']];
+const monRunning = new Set();
+const monRemote = new Map(); // sharedId → [run] (resultados vindos do servidor)
+let monModal = null;         // redesenha a tela de monitores quando chega resultado
+const monLocal = () => (settings().monitorRuns ||= {});    // monitorId → [run] (últimos, deste computador)
+const monRunners = () => (settings().monitorRunners ||= {}); // monitorId → true/false (rodar neste computador)
+function runsHere(w, m) {
+  const v = monRunners()[m.id];
+  if (v !== undefined) return v;
+  return !w.shared || !m.createdBy || m.createdBy === me()?.username; // padrão: quem criou
+}
+function lastRun(w, m) {
+  const local = (monLocal()[m.id] || [])[0];
+  const remote = w.shared ? (monRemote.get(w.shared.id) || []).find((r) => r.monitorId === m.id) : null;
+  if (!local) return remote || null;
+  if (!remote) return local;
+  return new Date(remote.at) > new Date(local.at) ? remote : local;
+}
+async function runMonitor(w, m, { manual = false } = {}) {
+  if (monRunning.has(m.id)) return null;
+  const wd = wsData(w);
+  const col = (wd.collections || []).find((c) => c.id === m.colId);
+  const started = Date.now();
+  let run;
+  monRunning.add(m.id); monModal?.();
+  try {
+    if (!col) throw new Error('A coleção deste monitor não existe mais.');
+    const env = (wd.environments || []).find((e) => e.id === m.envId) || null;
+    const ctxVars = { env: clone(env?.vars || []), col: clone(col.variables || []), glob: clone((wd.globals || {}).vars || []) };
+    const list = requestsInOrder(col, m.folderId || null).filter((r) => kindOf(r) === 'http');
+    if (!list.length) throw new Error('Não há requisições HTTP para rodar.');
+    extraCols.add(wd.collections);
+    const recs = [];
+    try {
+      for (const r of list) {
+        const req = clone(r);
+        if (!req.auth || req.auth.type === 'inherit') req.auth = clone(inheritedAuth(col, r.folderId).auth);
+        const { rec } = await runnerExec(col, req, { w: ctxVars, row: {}, i: 0, n: 1 });
+        recs.push(rec);
+      }
+    } finally { extraCols.delete(wd.collections); }
+    const failed = recs.filter(recFailed);
+    run = { monitorId: m.id, name: m.name, ok: !failed.length, total: recs.length, failed: failed.length, durationMs: Date.now() - started,
+      failures: failed.slice(0, 20).map((x) => {
+        const t = (x.tests || []).find((y) => !y.pass && !y.skipped);
+        return { name: x.name, error: x.error || (t ? `${t.name}${t.error ? ': ' + t.error : ''}` : 'falhou') + (x.status ? ` (HTTP ${x.status})` : '') };
+      }) };
+  } catch (e) {
+    run = { monitorId: m.id, name: m.name, ok: false, total: 0, failed: 1, durationMs: Date.now() - started, failures: [{ name: m.name, error: e.message }] };
+  } finally { monRunning.delete(m.id); }
+  run.at = new Date().toISOString();
+  run.by = me() ? { username: me().username } : { username: 'você' };
+  run.manual = manual;
+  const prev = lastRun(w, m);
+  const list = monLocal()[m.id] || [];
+  list.unshift(run); monLocal()[m.id] = list.slice(0, 30);
+  persist();
+  if (w.shared && loggedIn()) cloudCall('POST', `/v1/workspaces/${w.shared.id}/monitor-runs`, run).then((r) => { if (r.ok) addRemoteRun(w, r.data.run); });
+  monitorNotify(w, m, run, prev);
+  monModal?.(); renderMonAlert();
+  return run;
+}
+function addRemoteRun(w, run) {
+  const list = monRemote.get(w.shared.id) || [];
+  if (!list.some((r) => r.id === run.id)) list.unshift(run);
+  monRemote.set(w.shared.id, list.slice(0, 300));
+}
+function onMonitorRun(w, run) {
+  const m = (wsData(w).monitors || []).find((x) => x.id === run.monitorId);
+  const prev = m ? lastRun(w, m) : null;
+  addRemoteRun(w, run);
+  if (m && run.by && run.by.username !== me()?.username) monitorNotify(w, m, run, prev, run.by.username);
+  monModal?.(); renderMonAlert();
+}
+// Avisa quando o monitor muda de estado (ok → falha ou falha → ok), com notificação do Windows.
+function monitorNotify(w, m, run, prev, who = null) {
+  if (m.notify === false) return;
+  const changed = !prev || prev.ok !== run.ok;
+  if (!changed && !run.manual) return;
+  const title = run.ok ? `✓ ${m.name} voltou a funcionar` : `✗ ${m.name} falhou`;
+  const text = run.ok ? `${run.total} requisição(ões) OK${who ? ' · rodado por @' + who : ''}` : `${run.failures[0]?.name || ''}: ${run.failures[0]?.error || ''}${who ? ' · rodado por @' + who : ''}`;
+  toast(`${title} — ${text}`, run.ok ? 3500 : 7000);
+  if (!run.manual && typeof Notification !== 'undefined' && (Notification.permission === 'granted' || Notification.permission === 'default')) {
+    try { const n = new Notification(`Mono · ${title}`, { body: `${w.name}: ${text}`, silent: run.ok }); n.onclick = () => { window.focus(); if (w.id !== data.activeWorkspaceId) switchWorkspace(w.id); openMonitors(); }; } catch { /* sem notificação */ }
+  }
+}
+function monitorTick() {
+  if (!data) return;
+  for (const w of data.workspaces) {
+    for (const m of wsData(w).monitors || []) {
+      if (m.enabled === false || !runsHere(w, m) || monRunning.has(m.id)) continue;
+      const last = (monLocal()[m.id] || [])[0];
+      const every = (Number(m.every) || 15) * 60000;
+      if (!last || Date.now() - new Date(last.at).getTime() >= every) runMonitor(w, m);
+    }
+  }
+}
+function renderMonAlert() {
+  const el = $('#monAlert');
+  if (!el || !data) return;
+  const w = activeWorkspace();
+  const failing = (wsData(w).monitors || []).filter((m) => m.enabled !== false && lastRun(w, m) && !lastRun(w, m).ok);
+  el.classList.toggle('hidden', !failing.length);
+  el.textContent = failing.length === 1 ? `${failing[0].name} falhando` : `${failing.length} monitores falhando`;
+  el.title = failing.map((m) => `${m.name}: ${lastRun(w, m).failures[0]?.error || ''}`).join('\n');
+}
+async function loadMonitorRuns(w) {
+  if (!w.shared || !loggedIn()) return;
+  const r = await cloudCall('GET', `/v1/workspaces/${w.shared.id}/monitor-runs`);
+  if (r.ok) { monRemote.set(w.shared.id, r.data.runs); monModal?.(); renderMonAlert(); }
+}
+function openMonitorForm(w, m = null, preset = {}) {
+  const wd = wsData(w);
+  if (!(wd.collections || []).length) return toast('Crie ou importe uma coleção primeiro.', 2600);
+  openModal((body, close) => {
+    const cur = m ? clone(m) : { id: uid('mon'), name: preset.name || '', colId: preset.colId || wd.collections[0].id, folderId: preset.folderId || null, envId: wd.activeEnvId || '', every: 15, enabled: true, notify: true, createdBy: me()?.username || '' };
+    const name = h('input', { value: cur.name, placeholder: 'Ex.: SEFAZ SP — status do serviço', maxlength: 80 });
+    const target = h('select', {});
+    for (const c of wd.collections) {
+      target.append(h('option', { value: c.id + '|' }, c.name));
+      for (const f of foldersOf(c)) target.append(h('option', { value: c.id + '|' + f.id }, `${c.name} / ${folderPath(c, f.id).map((x) => x.name).join(' / ')}`));
+    }
+    target.value = cur.colId + '|' + (cur.folderId || '');
+    const envSel = h('select', {}, h('option', { value: '' }, 'Sem ambiente'), (wd.environments || []).map((e) => h('option', { value: e.id }, e.name + (e.prod ? ' · PRODUÇÃO' : ''))));
+    envSel.value = cur.envId || '';
+    const every = h('select', {}, MON_EVERY.map(([v, l]) => h('option', { value: String(v) }, l)));
+    every.value = String(cur.every);
+    const notify = h('input', { type: 'checkbox', checked: cur.notify !== false });
+    const err = h('p', { class: 'ws-err hidden' });
+    queueMicrotask(() => { customSelect(target); customSelect(envSel); customSelect(every); });
+    const save = async () => {
+      cur.name = name.value.trim();
+      if (!cur.name) { err.textContent = 'Dê um nome ao monitor.'; err.classList.remove('hidden'); return; }
+      const [colId, folderId] = target.value.split('|');
+      Object.assign(cur, { colId, folderId: folderId || null, envId: envSel.value, every: Number(every.value), notify: notify.checked });
+      const col = wd.collections.find((c) => c.id === colId);
+      const env = (wd.environments || []).find((e) => e.id === cur.envId);
+      const mut = requestsInOrder(col, cur.folderId).filter((r) => isMutating(r.method) && kindOf(r) === 'http');
+      if (env && env.prod && mut.length && !(await confirmModal({ title: 'Monitorar em produção?', sub: `${plural(mut.length, 'requisição altera', 'requisições alteram')} dados (${mut.slice(0, 3).map((r) => r.method + ' ' + r.name).join(', ')}) e ${plural(mut.length, 'vai', 'vão')} rodar em “${env.name}” ${MON_EVERY.find(([v]) => v === cur.every)[1].toLowerCase()}.`, ok: 'Monitorar mesmo assim' }))) return openMonitorForm(w, m, preset);
+      wd.monitors ||= [];
+      const i = wd.monitors.findIndex((x) => x.id === cur.id);
+      if (i >= 0) wd.monitors[i] = cur; else { wd.monitors.push(cur); monRunners()[cur.id] = true; }
+      persist();
+      close();
+      openMonitors(w);
+      if (i < 0) runMonitor(w, cur, { manual: true });
+    };
+    body.append(h('h2', {}, m ? 'Editar monitor' : 'Novo monitor'),
+      h('p', { class: 'sub' }, 'Roda as requisições no Mono deste computador — com o seu certificado e os seus segredos — e avisa quando algo quebra. Em workspace compartilhado, o time vê os resultados.'),
+      h('div', { class: 'field' }, h('label', {}, 'Nome'), name),
+      h('div', { class: 'field' }, h('label', {}, 'O que rodar'), target),
+      h('div', { class: 'row-gap' }, h('div', { class: 'field grow' }, h('label', {}, 'Ambiente'), envSel), h('div', { class: 'field grow' }, h('label', {}, 'Frequência'), every)),
+      h('label', { class: 'check-row' }, notify, h('span', {}, h('b', {}, 'Avisar quando falhar ou voltar'), ' — notificação do Windows')),
+      h('p', { class: 'hint' }, 'Falha = erro de rede, erro em script ou teste (pm.test) que não passou. Sem testes, só erros de conexão contam — adicione pm.test na aba Scripts para checar o conteúdo.'),
+      err,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: () => { close(); openMonitors(w); } }, 'Cancelar'), h('button', { class: 'btn-primary', onclick: save }, m ? 'Salvar' : 'Criar e rodar agora')));
+    setTimeout(() => name.focus(), 0);
+  });
+}
+function openMonitors(w = activeWorkspace()) {
+  if (w.shared) loadMonitorRuns(w);
+  openModal((body, close) => {
+    body.classList.add('wide');
+    const list = h('div', { class: 'mon-list' });
+    const open = new Set();
+    const draw = () => {
+      list.innerHTML = '';
+      const wd = wsData(w);
+      const mons = wd.monitors || [];
+      if (!mons.length) list.append(h('div', { class: 'ex-empty' }, h('b', {}, 'Nenhum monitor'), 'Crie um para rodar uma coleção de tempos em tempos — por exemplo, o status da SEFAZ a cada 15 minutos — e ser avisado quando falhar.'));
+      for (const m of mons) {
+        const col = (wd.collections || []).find((c) => c.id === m.colId);
+        const env = (wd.environments || []).find((e) => e.id === m.envId);
+        const last = lastRun(w, m);
+        const here = runsHere(w, m);
+        const running = monRunning.has(m.id);
+        const runs = [...(monLocal()[m.id] || []), ...(w.shared ? (monRemote.get(w.shared.id) || []).filter((r) => r.monitorId === m.id && r.by?.username !== me()?.username) : [])]
+          .sort((a, b) => new Date(b.at) - new Date(a.at)).slice(0, 20);
+        const status = running ? h('span', { class: 'mon-badge run' }, 'Rodando…')
+          : !last ? h('span', { class: 'mon-badge' }, 'Ainda não rodou')
+          : h('span', { class: 'mon-badge ' + (last.ok ? 'ok' : 'fail'), title: last.ok ? '' : last.failures.map((f) => `${f.name}: ${f.error}`).join('\n') }, last.ok ? `✓ ${last.total}/${last.total}` : `✗ ${last.failed} falha${last.failed > 1 ? 's' : ''}`);
+        const hereBox = h('input', { type: 'checkbox', checked: here, onchange: (e) => { monRunners()[m.id] = e.target.checked; persist(); draw(); } });
+        const enabled = m.enabled !== false;
+        const row = h('div', { class: 'mon-row' + (enabled ? '' : ' off') },
+          h('div', { class: 'mon-main', onclick: () => { if (open.has(m.id)) open.delete(m.id); else open.add(m.id); draw(); } },
+            status,
+            h('div', { class: 'mon-info' },
+              h('div', { class: 'mon-name' }, m.name, enabled ? null : h('span', { class: 'tag' }, 'pausado')),
+              h('div', { class: 'muted small' }, `${col ? col.name + (m.folderId ? ' / ' + (folderById(col, m.folderId)?.name || '?') : '') : 'coleção removida'} · ${env ? env.name : 'sem ambiente'} · ${(MON_EVERY.find(([v]) => v === Number(m.every)) || [, m.every + ' min'])[1].toLowerCase()}`),
+              last ? h('div', { class: 'muted small' }, `Última: ${ago(last.at)}${last.by && w.shared ? ' · por @' + last.by.username : ''}${last.ok ? '' : ' — ' + (last.failures[0]?.name || '') + ': ' + (last.failures[0]?.error || '')}`) : null)),
+          h('label', { class: 'mon-here', title: 'Este computador roda o monitor no horário (o Mono precisa estar aberto)' }, hereBox, 'Rodar aqui'),
+          h('button', { class: 'btn-ghost sm', disabled: running, onclick: () => runMonitor(w, m, { manual: true }) }, 'Rodar agora'),
+          h('button', { class: 'btn-ghost sm', title: 'Opções', onclick: (e) => showMenu(e.currentTarget, [
+            { label: 'Editar…', run: () => openMonitorForm(w, m) },
+            { label: enabled ? 'Pausar' : 'Retomar', run: () => { m.enabled = !enabled; persist(); draw(); renderMonAlert(); } },
+            '-',
+            { label: 'Excluir', run: async () => { if (await confirmModal({ title: `Excluir “${m.name}”?`, sub: 'O monitor para de rodar em todos os computadores.' })) { wd.monitors.splice(wd.monitors.indexOf(m), 1); persist(); } openMonitors(w); } },
+          ]) }, '⋯'));
+        if (open.has(m.id)) {
+          row.append(h('div', { class: 'mon-runs' }, runs.length ? runs.map((r) => h('div', { class: 'mon-run ' + (r.ok ? 'ok' : 'fail') },
+            h('span', { class: 'mon-dot' }), h('span', {}, new Date(r.at).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })),
+            h('span', { class: 'muted small' }, `${r.total - r.failed}/${r.total} ok · ${fmtTime(r.durationMs)}${r.by && w.shared ? ' · @' + r.by.username : ''}${r.manual ? ' · manual' : ''}`),
+            r.ok ? null : h('span', { class: 'mon-err' }, r.failures.map((f) => `${f.name}: ${f.error}`).join(' · ')))) : h('p', { class: 'hint' }, 'Nenhuma execução ainda.')));
+        }
+        list.append(row);
+      }
+    };
+    monModal = () => { if (!$('#modal').classList.contains('hidden') && body.contains(list)) draw(); else monModal = null; };
+    draw();
+    body.append(h('div', { class: 'ws-head' },
+      h('div', {}, h('h2', {}, 'Monitores'), h('p', { class: 'sub' }, `Rodam no Mono aberto${w.shared ? '; o time vê os resultados e é avisado quando algo cai' : ''}. Marque “Rodar aqui” no computador que deve executar.`)),
+      canEditWs(w) ? h('button', { class: 'btn-primary', onclick: () => openMonitorForm(w) }, '+ Novo monitor') : null),
+      list,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: () => { monModal = null; close(); } }, 'Fechar')));
+  });
 }
 
 // ---------- Comparar ambientes ----------
@@ -2381,8 +3099,10 @@ function renderResponse() {
   const tab = activeTab();
   const state = rt(tab);
   const sendBtn = $('#sendBtn');
-  sendBtn.disabled = !!state.loading; sendBtn.textContent = state.loading ? 'Enviando…' : 'Enviar';
   pane.innerHTML = '';
+  if (kindOf(tab.draft) !== 'http') return renderLive(pane, tab);
+  sendBtn.classList.remove('danger');
+  sendBtn.disabled = !!state.loading; sendBtn.textContent = state.loading ? 'Enviando…' : 'Enviar';
   if (state.loading) {
     pane.append(h('div', { class: 'placeholder' }, h('div', {}, h('div', { class: 'spinner' }), 'Aguardando resposta…')));
     return;
@@ -2438,11 +3158,12 @@ function renderResponse() {
   const head = h('div', { class: 'res-head' },
     h('nav', { class: 'subtabs' }, tabs.map(([k, label]) => h('button', { class: resTab === k ? 'active' : '', onclick: () => { resTab = k; renderResponse(); } }, label))),
     h('div', { class: 'res-tools' },
+      res.example == null && res.body != null && !state.compare ? h('button', { class: 'btn-ghost sm', title: 'Guardar esta resposta na requisição (documentação e mock server)', onclick: () => saveExample(tab, res) }, 'Salvar como exemplo') : null,
       resTab === 'preview' && isHtml ? h('span', { class: 'muted small', title: 'Scripts e formulários da página ficam bloqueados no preview' }, 'Scripts desativados') : null,
       null),
     h('div', { class: 'metrics' },
       h('span', { class: `status s${String(res.status)[0]}` }, `${res.status} ${res.statusText || ''}`.trim()),
-      h('span', {}, 'Tempo ', h('b', {}, fmtTime(res.time))),
+      res.example != null ? h('span', { class: 'flag', title: 'Exemplo salvo — não é uma resposta ao vivo' }, 'Exemplo · ' + res.example) : h('span', {}, 'Tempo ', h('b', {}, fmtTime(res.time))),
       h('span', {}, 'Tamanho ', h('b', {}, fmtBytes(res.size))),
       ch && ch.list.length ? h('button', { class: 'flag warn', title: 'A estrutura do JSON mudou desde a última resposta', onclick: () => { resTab = 'changes'; renderResponse(); } }, `${ch.list.length} mudança${ch.list.length > 1 ? 's' : ''}`) : null,
       ct ? h('button', { class: 'flag ' + (ct.status === 'ok' ? 'ok' : 'warn'), title: ct.message, onclick: () => { resTab = 'contract'; renderResponse(); } },
@@ -2509,6 +3230,217 @@ function renderResponse() {
     else api.preview(`<!doctype html><meta charset="utf-8"><style>body{font:13px system-ui,sans-serif;margin:16px;color:#111;background:#fff}</style>${vis.html}`, '').then((url) => { state.visFor = vis; state.visUrl = url; frame.src = url; });
   }
   pane.append(head, toolbar, body);
+}
+
+// ---------- Exemplos salvos (respostas de referência) ----------
+// Ficam dentro da requisição (sincronizam com o workspace) e alimentam o mock server.
+const headerOf = (list, name) => ((list || []).find((x) => String(x.key).toLowerCase() === name) || {}).value || '';
+function exampleAsResponse(ex, req) {
+  const body = ex.body == null ? '' : String(ex.body);
+  return { ok: true, status: Number(ex.status) || 200, statusText: ex.statusText || '', time: 0, size: new TextEncoder().encode(body).length,
+    headers: ex.headers || [], contentType: ex.contentType || headerOf(ex.headers, 'content-type'), body, url: req?.url || '', example: ex.name };
+}
+const KEEP_HEADERS = /^(content-type|location|cache-control|etag|x-[\w-]+|link|retry-after|www-authenticate|set-cookie)$/i;
+function exampleFromResponse(res, name) {
+  return { id: uid('ex'), name, status: res.status, statusText: res.statusText || '', contentType: res.contentType || '',
+    headers: (res.headers || []).filter((x) => KEEP_HEADERS.test(x.key) && !/^x-mono-/i.test(x.key)).map((x) => ({ key: x.key, value: x.value })),
+    body: res.body ?? '', savedAt: Date.now() };
+}
+// Exemplos são documentação: mudam direto na requisição salva (sem precisar de Ctrl+S).
+function mutateExamples(tab, fn) {
+  const d = tab.draft;
+  d.examples ||= [];
+  fn(d.examples);
+  const found = findRef(tab.ref);
+  if (found) { found.req.examples = clone(d.examples); persist(); mockRefresh(); }
+  else markDirty();
+  updateCounts();
+  if (reqTab === 'examples' && activeTab() === tab) renderReqEditor();
+}
+async function saveExample(tab, res) {
+  if (res.body == null) { toast('Respostas binárias não podem virar exemplo.', 2600); return; }
+  const n = (tab.draft.examples || []).length;
+  const o = await promptModal({ title: 'Salvar como exemplo', sub: 'Fica guardado nesta requisição. O mock server responde com ele.', label: 'Nome', value: `${res.status} ${res.statusText || ''}`.trim() + (n ? ` (${n + 1})` : ''), ok: 'Salvar exemplo' });
+  if (!o) return;
+  mutateExamples(tab, (list) => list.push(exampleFromResponse(res, o.value)));
+  toast(findRef(tab.ref) ? 'Exemplo salvo' : 'Exemplo guardado na aba. Salve a requisição (Ctrl+S) para mantê-lo.', 3200);
+}
+function showExample(tab, ex) {
+  const st = rt(tab);
+  st.response = exampleAsResponse(ex, tab.draft);
+  st.scripts = null; st.compare = null; st.changes = null; st.contract = null; st.lang = null;
+  resTab = 'body';
+  renderResponse();
+}
+const CT_OPTIONS = [['application/json; charset=utf-8', 'JSON'], ['application/xml; charset=utf-8', 'XML'], ['text/plain; charset=utf-8', 'Texto'], ['text/html; charset=utf-8', 'HTML']];
+function openExampleEditor(tab, ex = null) {
+  const draft = ex ? clone(ex) : { id: uid('ex'), name: 'Exemplo', status: 200, statusText: 'OK', contentType: CT_OPTIONS[0][0], headers: [], body: '{\n  \n}', savedAt: Date.now() };
+  draft.headers ||= [];
+  openModal((body, close) => {
+    body.classList.add('wide');
+    const name = h('input', { value: draft.name, spellcheck: 'false' });
+    const status = h('input', { value: String(draft.status), inputmode: 'numeric', maxlength: 3, class: 'w-status' });
+    const ctSel = h('select', {}, CT_OPTIONS.map(([v, l]) => h('option', { value: v }, l)), h('option', { value: '__other' }, 'Outro…'));
+    const known = CT_OPTIONS.find(([v]) => v.split(';')[0] === String(draft.contentType || '').split(';')[0]);
+    ctSel.value = known ? known[0] : '__other';
+    const ctOther = h('input', { value: known ? '' : draft.contentType || '', placeholder: 'tipo/subtipo', class: known ? 'hidden' : '' });
+    ctSel.addEventListener('change', () => ctOther.classList.toggle('hidden', ctSel.value !== '__other'));
+    const lang = () => { const ct = ctSel.value === '__other' ? ctOther.value : ctSel.value; return /json/i.test(ct) ? 'json' : /xml|html/i.test(ct) ? 'markup' : 'text'; };
+    const editor = window.MonoScripts.codeEditor({ value: draft.body || '', label: 'Corpo do exemplo', complete: false,
+      highlight: (v) => (lang() === 'json' ? highlightJson(v) : lang() === 'markup' ? v.split('\n').map(highlightMarkupLine).join('\n') : esc(v)),
+      onChange: (v) => { draft.body = v; } });
+    const err = h('p', { class: 'ws-err hidden' });
+    const save = () => {
+      const st = Number(status.value);
+      if (!(st >= 100 && st <= 599)) { err.textContent = 'Status precisa ser um número entre 100 e 599.'; err.classList.remove('hidden'); return; }
+      draft.name = name.value.trim() || `${st}`;
+      draft.status = st; draft.statusText = draft.statusText && ex && ex.status === st ? draft.statusText : '';
+      draft.contentType = ctSel.value === '__other' ? ctOther.value.trim() : ctSel.value;
+      draft.headers = draft.headers.filter((x) => x.key);
+      mutateExamples(tab, (list) => { const i = list.findIndex((x) => x.id === draft.id); if (i >= 0) list[i] = draft; else list.push(draft); });
+      close();
+      toast(ex ? 'Exemplo atualizado' : 'Exemplo criado');
+    };
+    body.append(
+      h('h2', {}, ex ? 'Editar exemplo' : 'Novo exemplo'),
+      h('p', { class: 'sub' }, 'O mock server devolve exatamente isto quando alguém chamar esta rota.'),
+      h('div', { class: 'ex-grid' },
+        h('div', { class: 'field' }, h('label', {}, 'Nome'), name),
+        h('div', { class: 'field' }, h('label', {}, 'Status'), status),
+        h('div', { class: 'field' }, h('label', {}, 'Tipo do conteúdo'), h('div', { class: 'row-gap' }, ctSel, ctOther))),
+      h('div', { class: 'field' }, h('label', {}, 'Corpo'), h('div', { class: 'body-code ex-body' }, editor)),
+      h('details', { class: 'ex-headers', open: draft.headers.length > 0 }, h('summary', {}, `Headers da resposta (${draft.headers.length})`), kvTable(draft.headers, () => {}, { keyPh: 'Header' })),
+      err,
+      h('div', { class: 'modal-actions' }, h('button', { class: 'btn-ghost', onclick: close }, 'Cancelar'), h('button', { class: 'btn-primary', onclick: save }, ex ? 'Salvar' : 'Criar exemplo')));
+    queueMicrotask(() => customSelect(ctSel, { variant: 'compact' }));
+  });
+}
+function renderExamplesTab(ed, tab) {
+  const list = tab.draft.examples || [];
+  const st = rt(tab);
+  const head = h('div', { class: 'body-bar' }, h('span', { class: 'body-bar-label' }, list.length ? plural(list.length, 'exemplo', 'exemplos') : 'Exemplos'), h('div', { class: 'grow' }),
+    h('button', { class: 'btn-ghost sm', onclick: () => openExampleEditor(tab) }, '+ Novo exemplo'));
+  ed.append(head);
+  if (!list.length) {
+    ed.append(h('div', { class: 'ex-empty' }, h('b', {}, 'Nenhum exemplo salvo'),
+      'Envie a requisição e clique em “Salvar como exemplo” na resposta, ou crie um à mão. Os exemplos documentam a API e alimentam o mock server da coleção.'));
+    return;
+  }
+  const rows = h('div', { class: 'ex-list' });
+  for (const ex of list) {
+    const showing = st.response && st.response.example === ex.name;
+    const def = !!ex.isDefault;
+    rows.append(h('div', { class: 'ex-row' + (showing ? ' on' : '') },
+      h('span', { class: `status s${String(ex.status)[0]}` }, String(ex.status)),
+      h('button', { class: 'ex-name', title: 'Ver na resposta', onclick: () => showExample(tab, ex) }, ex.name),
+      def ? h('span', { class: 'tag', title: 'O mock responde com este exemplo por padrão' }, 'padrão do mock') : null,
+      h('span', { class: 'muted small' }, fmtBytes(new TextEncoder().encode(ex.body || '').length)),
+      h('div', { class: 'grow' }),
+      h('button', { class: 'btn-text sm', onclick: () => showExample(tab, ex) }, 'Ver'),
+      h('button', { class: 'more', title: 'Opções', onclick: (e) => showMenu(e.currentTarget, [
+        { label: 'Editar…', run: () => openExampleEditor(tab, ex) },
+        { label: def ? 'Deixar de ser o padrão do mock' : 'Usar como padrão no mock', run: () => mutateExamples(tab, (l) => l.forEach((x) => { x.isDefault = x.id === ex.id ? !def : false; })) },
+        { label: 'Duplicar', run: () => mutateExamples(tab, (l) => l.splice(l.indexOf(l.find((x) => x.id === ex.id)) + 1, 0, { ...clone(ex), id: uid('ex'), name: ex.name + ' (cópia)', isDefault: false })) },
+        '-',
+        { label: 'Excluir', run: async () => { if (await confirmModal({ title: 'Excluir exemplo?', sub: `“${ex.name}” sai da requisição e do mock server.` })) mutateExamples(tab, (l) => l.splice(l.findIndex((x) => x.id === ex.id), 1)); } },
+      ]) }, '⋯')));
+  }
+  ed.append(rows, h('p', { class: 'hint' }, 'No mock server, escolha um exemplo específico com o header x-mono-example: <nome ou status> ou ?__example=<nome>.'));
+}
+
+// ---------- Mock server local ----------
+const mockState = { running: false, colId: null, url: '', port: 0, hits: [], redraw: null };
+const mockRoutesFor = (col) => window.MonoMockRoutes.routesFromCollection(col);
+let mockTimer = null;
+function mockRefresh() {
+  if (!mockState.running || !api.mock) return;
+  clearTimeout(mockTimer);
+  mockTimer = setTimeout(() => {
+    const col = data.collections.find((c) => c.id === mockState.colId);
+    api.mock.update({ routes: col ? mockRoutesFor(col) : [] }).catch(() => {});
+    mockState.redraw?.();
+  }, 300);
+}
+function mockInit() {
+  if (!api.mock) return;
+  api.mock.onHit((hit) => { mockState.hits.unshift(hit); mockState.hits.length = Math.min(mockState.hits.length, 60); mockState.redraw?.(); });
+  api.mock.status().then((s) => { if (s && s.running) Object.assign(mockState, { running: true, url: s.url, port: s.port }); }).catch(() => {});
+}
+function openMock(col) {
+  if (!api.mock) { toast('O mock server só funciona no app instalado.', 3000); return; }
+  openModal((body, close) => {
+    body.classList.add('wide');
+    const port = h('input', { value: String(data.mockPort || 4010), inputmode: 'numeric', maxlength: 5, class: 'w-port' });
+    const delay = h('input', { value: String(data.mockDelay || 0), inputmode: 'numeric', maxlength: 5, class: 'w-port', title: 'Atraso de cada resposta, em milissegundos' });
+    const statusEl = h('div', { class: 'mock-status' });
+    const routesEl = h('div', {});
+    const hitsEl = h('div', { class: 'mock-hits' });
+    const thisCol = () => mockState.running && mockState.colId === col.id;
+    const draw = () => {
+      if (!body.isConnected) { mockState.redraw = null; return; }
+      const routes = mockRoutesFor(col);
+      statusEl.innerHTML = '';
+      const other = mockState.running && mockState.colId !== col.id ? data.collections.find((c) => c.id === mockState.colId) : null;
+      statusEl.append(
+        h('span', { class: 'cloud-state ' + (thisCol() ? 'online' : 'off') }, h('span', { class: 'dot' }), thisCol() ? 'Rodando' : other ? `Rodando para “${other.name}”` : 'Parado'),
+        thisCol() ? h('span', { class: 'mock-url' }, h('code', {}, mockState.url), copyButton(mockState.url, 'Copiar endereço')) : null,
+        h('div', { class: 'grow' }),
+        h('label', { class: 'mock-field' }, 'Porta', port), h('label', { class: 'mock-field' }, 'Atraso (ms)', delay),
+        thisCol()
+          ? h('button', { class: 'btn-ghost', onclick: async () => { await api.mock.stop(); mockState.running = false; draw(); renderSidebar(); } }, 'Parar')
+          : h('button', { class: 'btn-primary', disabled: !routes.length, onclick: start }, other ? 'Trocar para esta coleção' : 'Iniciar mock'));
+      routesEl.innerHTML = '';
+      if (!routes.length) {
+        routesEl.append(h('div', { class: 'ex-empty' }, h('b', {}, 'Nenhum exemplo salvo nesta coleção'), 'Envie uma requisição e clique em “Salvar como exemplo” na resposta. Cada requisição com exemplo vira uma rota do mock.'));
+      } else {
+        routesEl.append(h('table', { class: 'data-table mock-routes' },
+          h('tr', {}, h('th', {}, 'Método'), h('th', {}, 'Rota'), h('th', {}, 'Requisição'), h('th', {}, 'Responde com')),
+          routes.map((r) => { const ex = window.MonoMockRoutes.pickExample(r); return h('tr', {},
+            h('td', {}, h('span', { class: 'm ' + methodClass(r.method) }, r.method)), h('td', { class: 'mono' }, r.path), h('td', {}, r.request),
+            h('td', {}, h('span', { class: `status s${String(ex.status)[0]}` }, String(ex.status)), ' ', ex.name, r.examples.length > 1 ? h('span', { class: 'muted small' }, ` +${r.examples.length - 1}`) : null)); })));
+      }
+      hitsEl.innerHTML = '';
+      const hits = thisCol() ? mockState.hits : [];
+      if (thisCol()) {
+        hitsEl.append(h('div', { class: 'section-label' }, 'Chamadas recebidas'));
+        if (!hits.length) hitsEl.append(h('p', { class: 'muted small' }, `Aponte o seu front para ${mockState.url} e as chamadas aparecem aqui.`));
+        for (const x of hits.slice(0, 30)) hitsEl.append(h('div', { class: 'mock-hit' },
+          h('span', { class: 'muted small' }, new Date(x.at).toLocaleTimeString('pt-BR')),
+          h('span', { class: 'm ' + methodClass(x.method) }, x.method), h('span', { class: 'mono grow-text' }, x.path),
+          h('span', { class: `status s${String(x.status)[0]}` }, String(x.status)),
+          h('span', { class: 'muted small' }, x.matched ? `${x.matched.request} › ${x.matched.example}` : 'sem rota')));
+      }
+    };
+    async function start() {
+      const p = Number(port.value);
+      if (!(p >= 1024 && p <= 65535)) { toast('Use uma porta entre 1024 e 65535.', 2600); return; }
+      data.mockPort = p; data.mockDelay = Math.max(0, Number(delay.value) || 0); persist();
+      try {
+        const r = await api.mock.start({ port: p, delay: data.mockDelay, routes: mockRoutesFor(col) });
+        Object.assign(mockState, { running: true, colId: col.id, url: r.url, port: r.port, hits: [] });
+        toast(`Mock no ar em ${r.url}`, 2600);
+      } catch (e) { toast(String(e.message || e).replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 4000); }
+      draw(); renderSidebar();
+    }
+    delay.addEventListener('change', () => { data.mockDelay = Math.max(0, Number(delay.value) || 0); persist(); if (thisCol()) api.mock.update({ delay: data.mockDelay }); });
+    const mkEnv = h('button', { class: 'btn-ghost sm', title: 'Cria (ou atualiza) um ambiente com baseUrl apontando para o mock', onclick: () => {
+      const url = mockState.running ? mockState.url : `http://localhost:${Number(port.value) || 4010}`;
+      const name = `Mock · ${col.name}`;
+      let env = data.environments.find((e) => e.name === name);
+      if (!env) { env = { id: uid('env'), name, vars: clone(activeEnv()?.vars || []).filter((v) => !v.secret) }; data.environments.push(env); }
+      const v = env.vars.find((x) => x.key === 'baseUrl');
+      if (v) v.value = url; else env.vars.unshift({ key: 'baseUrl', value: url, enabled: true });
+      data.activeEnvId = env.id; persist(); renderEnvSelect();
+      toast(`Ambiente “${name}” ativo: {{baseUrl}} = ${url}`, 3200);
+    } }, 'Usar no Mono (ambiente “Mock”)');
+    mockState.redraw = draw;
+    draw();
+    body.append(
+      h('h2', {}, `Mock server · ${col.name}`),
+      h('p', { class: 'sub' }, 'Uma API falsa no seu computador, montada com os exemplos salvos. O front pode desenvolver antes do back ficar pronto. Só aceita conexões desta máquina.'),
+      statusEl, routesEl, hitsEl,
+      h('div', { class: 'modal-actions spread' }, mkEnv, h('button', { class: 'btn-ghost', onclick: () => { mockState.redraw = null; close(); } }, 'Fechar')));
+  });
 }
 
 // ---------- Salvar ----------
@@ -2678,7 +3610,8 @@ function draggable(row, item) {
   row.addEventListener('dragend', () => { dragItem = null; $$('.tree-row.drop').forEach((x) => x.classList.remove('drop')); });
 }
 
-function renderSidebar() {
+function renderSidebar() { renderSidebarCore(); decorateCollab(); }
+function renderSidebarCore() {
   const list = $('#sideList');
   const q = $('#sideSearch').value.trim().toLowerCase();
   list.innerHTML = '';
@@ -2702,6 +3635,8 @@ function renderSidebar() {
       const more = h('button', { class: 'more', title: 'Opções', onclick: (e) => { e.stopPropagation(); showMenu(e.currentTarget, [
         { label: 'Visão geral', run: () => openOverview(col) },
         { label: 'Executar coleção…', run: () => openRunner(col, null) },
+        { label: 'Monitorar…', run: () => openMonitorForm(activeWorkspace(), null, { colId: col.id, name: col.name }) },
+        { label: 'Mock server…', run: () => openMock(col) },
         '-',
         { label: 'Nova requisição', run: () => newRequestIn(col, null) },
         { label: 'Nova pasta', run: () => newFolder(col, null) },
@@ -2719,6 +3654,7 @@ function renderSidebar() {
       const head = h('div', { class: 'tree-row collection' + (open ? ' open' : ''), style: '--depth:0', onclick: () => { col.open = !col.open; persist(); renderSidebar(); }, html: icons.chev },
         h('span', { class: 'name' }, col.name), ovBtn,
         col.spec ? h('span', { class: 'tag', title: 'Coleção com contrato OpenAPI — respostas são validadas' }, 'API') : null,
+        mockState.running && mockState.colId === col.id ? h('button', { class: 'tag mock-tag', title: `Mock server rodando em ${mockState.url}`, onclick: (e) => { e.stopPropagation(); openMock(col); } }, 'MOCK') : null,
         h('span', { class: 'n' }, col.requests.length), more);
       dropTarget(head, col, null);
       list.append(head);
@@ -2731,6 +3667,7 @@ function renderSidebar() {
         const fopen = q ? true : f.open;
         const fmore = h('button', { class: 'more', title: 'Opções', onclick: (e) => { e.stopPropagation(); showMenu(e.currentTarget, [
           { label: 'Executar pasta…', run: () => openRunner(col, f) },
+          { label: 'Monitorar…', run: () => openMonitorForm(activeWorkspace(), null, { colId: col.id, folderId: f.id, name: `${col.name} / ${f.name}` }) },
           '-',
           { label: 'Nova requisição', run: () => newRequestIn(col, f.id) },
           { label: 'Nova pasta', run: () => newFolder(col, f.id) },
@@ -2764,10 +3701,11 @@ function renderSidebar() {
           { label: 'Renomear', run: async () => { const o = await promptModal({ title: 'Renomear requisição', label: 'Nome', value: r.name }); if (o) { r.name = o.value; session().tabs.forEach((t) => { if (t.ref?.reqId === r.id) t.draft.name = o.value; }); persist(); renderSidebar(); renderTabs(); renderRequest(); } } },
           { label: 'Duplicar', run: () => { const c = clone(r); c.id = uid('req'); c.name += ' (cópia)'; col.requests.splice(col.requests.indexOf(r) + 1, 0, c); persist(); renderSidebar(); } },
           { label: 'Mover para…', run: () => moveDialog(col, r) },
+          ...(activeWorkspace().shared ? [{ label: 'Histórico de alterações…', run: () => openHistory(activeWorkspace(), { itemId: r.id, title: `Histórico de “${r.name}”` }) }] : []),
           '-',
           { label: 'Excluir', run: async () => { if (await confirmModal({ title: 'Excluir requisição?', sub: `"${r.name}" será removida da coleção.` })) { col.requests = col.requests.filter((x) => x !== r); session().tabs.forEach((t) => { if (t.ref?.reqId === r.id) t.ref = null; }); persist(); renderSidebar(); renderRequest(); } } },
         ]); } }, '⋯');
-        const row = h('div', { class: 'tree-row request' + (activeRef?.reqId === r.id ? ' active' : ''), style: `--depth:${depth - 1}`, title: r.url, onclick: () => openTab(r, { colId: col.id, reqId: r.id }) },
+        const row = h('div', { class: 'tree-row request' + (activeRef?.reqId === r.id ? ' active' : ''), 'data-req': r.id, style: `--depth:${depth - 1}`, title: r.url, onclick: () => openTab(r, { colId: col.id, reqId: r.id }) },
           h('span', { class: 'm ' + methodClass(r.method) }, r.method), h('span', { class: 'name' }, r.name), rmore);
         draggable(row, { kind: 'request', colId: col.id, id: r.id });
         list.append(row);
@@ -3264,6 +4202,11 @@ function initVarFields() {
   renderWorkspaceBtn();
   bind();
   cloudInit();
+  liveInit();
+  setInterval(monitorTick, 30000); setTimeout(monitorTick, 8000);
+  $('#monAlert').addEventListener('click', () => openMonitors());
+  renderMonAlert();
+  mockInit();
   initDivider();
   renderTabs(); renderRequest(); renderResponse(); renderSidebar();
 })();

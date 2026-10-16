@@ -164,4 +164,4 @@ async function once(url, method, headers, body, signal, cfg) {
   });
 }
 
-module.exports = { hostMatches, certFor, inspect, request, toPem, parseProxy, keyPair };
+module.exports = { hostMatches, certFor, inspect, request, toPem, parseProxy, keyPair, tunnel };

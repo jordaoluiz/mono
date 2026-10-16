@@ -36,7 +36,12 @@
       if (a.in === 'query') url += (url.includes('?') ? '&' : '?') + `${encodeURIComponent(a.key)}=${encodeURIComponent(a.value || '')}`;
       else headers.push({ key: a.key, value: a.value || '' });
     }
-    const b = req.body || { type: 'none' };
+    let b = req.body || { type: 'none' };
+    if (b.type === 'graphql') {
+      const g = b.graphql || {};
+      let variables; try { variables = String(g.variables || '').trim() ? JSON.parse(g.variables) : undefined; } catch { variables = undefined; }
+      b = { type: 'json', raw: JSON.stringify({ query: g.query || '', ...(variables ? { variables } : {}) }, null, 2) };
+    }
     let body = { kind: 'none' };
     if (!['GET', 'HEAD'].includes(method)) {
       if ((b.type === 'json' || b.type === 'text' || b.type === 'xml') && b.raw) {

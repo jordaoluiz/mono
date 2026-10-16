@@ -18,10 +18,13 @@
           <span id="wsName">Workspace</span>
           <span class="ws-people hidden" id="wsPeople" title="Compartilhado"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.2"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M15.5 5.2a3.2 3.2 0 0 1 0 5.6M17.5 13.6A5.5 5.5 0 0 1 20.5 19"/></svg><span class="n">0</span><span class="dot"></span></span>
           <span class="ws-inv hidden" id="wsInvites">0</span>
+          <span class="ws-ro hidden" id="wsReadonly" title="Você tem acesso só de leitura neste workspace">só leitura</span>
           <svg class="ws-chev" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>
         </button>
+        <div class="ws-presence hidden" id="wsPresence"></div>
       </div>
       <div class="topbar-right">
+        <button class="mon-alert hidden" id="monAlert" title="Monitores com falha"></button>
         <div class="env">
           <label for="envSelect" class="muted small">Ambiente</label>
           <select id="envSelect" class="select-ghost"></select>
@@ -84,11 +87,14 @@
             <button class="btn-primary" id="sendBtn">Enviar</button>
           </div>
           <nav class="subtabs" id="reqTabs">
+            <button data-rt="message" hidden>Mensagem</button>
             <button data-rt="params" class="active">Params <span class="count" id="cParams"></span></button>
             <button data-rt="headers">Headers <span class="count" id="cHeaders"></span></button>
             <button data-rt="body">Body</button>
             <button data-rt="auth">Auth</button>
             <button data-rt="scripts">Scripts <span class="dot-ind tab-dot" id="cScripts"></span></button>
+            <button data-rt="examples">Exemplos <span class="count" id="cExamples"></span></button>
+            <button data-rt="comments">Comentários <span class="count" id="cComments"></span></button>
           </nav>
           <div class="editor" id="reqEditor"></div>
         </div>
@@ -119,6 +125,8 @@
   <script src="../shared/xml.js"></script>
   <script src="../shared/wsdl.js"></script>
   <script src="../shared/sync.js"></script>
+  <script src="../shared/graphql.js"></script>
+  <script src="../shared/mockroutes.js"></script>
   <script src="ui.js"></script>
   <script src="script-editor.js"></script>
   <script src="var-input.js"></script>

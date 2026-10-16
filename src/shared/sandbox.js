@@ -379,8 +379,9 @@
   function makeBody(b) {
     b = b || { type: 'none' };
     const body = {
-      mode: b.type === 'form' ? 'urlencoded' : b.type === 'multipart' ? 'formdata' : b.type === 'binary' ? 'file' : b.type === 'json' || b.type === 'text' || b.type === 'xml' ? 'raw' : undefined,
-      raw: b.raw || '',
+      mode: b.type === 'graphql' ? 'graphql' : b.type === 'form' ? 'urlencoded' : b.type === 'multipart' ? 'formdata' : b.type === 'binary' ? 'file' : b.type === 'json' || b.type === 'text' || b.type === 'xml' ? 'raw' : undefined,
+      raw: b.type === 'graphql' ? JSON.stringify({ query: (b.graphql || {}).query || '', variables: (b.graphql || {}).variables || '' }) : b.raw || '',
+      graphql: b.type === 'graphql' ? { query: (b.graphql || {}).query || '', variables: (b.graphql || {}).variables || '' } : undefined,
       urlencoded: new PropertyList(b.form || []),
       formdata: new PropertyList((b.multipart || []).map((m) => ({ key: m.key, value: m.kind === 'file' ? (m.fileName || '') : m.value, disabled: m.enabled === false, type: m.kind === 'file' ? 'file' : 'text' }))),
       options: { raw: { language: b.type === 'json' ? 'json' : b.type === 'xml' ? 'xml' : 'text' } },
@@ -401,7 +402,7 @@
   }
   function serializeBody(body) {
     // form-data com arquivos e binário não são reconstruídos pelo script: o corpo original segue intacto.
-    if (!body._changed && (body._orig === 'multipart' || body._orig === 'binary')) return JSON.parse(JSON.stringify(body._source));
+    if (!body._changed && (body._orig === 'multipart' || body._orig === 'binary' || body._orig === 'graphql')) return JSON.parse(JSON.stringify(body._source));
     if (!body.mode || body.mode === 'none') return { type: 'none', raw: body.raw || '', form: [] };
     if (body.mode === 'urlencoded' || body.mode === 'formdata') return { type: 'form', raw: '', form: (body.mode === 'formdata' ? new PropertyList(body.formdata || []) : body.urlencoded).members.map((m) => ({ key: m.key, value: persistable(m.value), enabled: !m.disabled })) };
     const lang = body.options && body.options.raw && body.options.raw.language;
